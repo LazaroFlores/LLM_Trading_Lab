@@ -1,4 +1,12 @@
 CLAUDE.md
 venv
+.venv
+.venv*/
+.venv*
 .idea
 __pycache__
+runs/
+
+# Experimentos locales / temporales (no versionar)
+Experiments/tmp_*/
+Experiments/mi_experimento/

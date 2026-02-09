@@ -1,0 +1,6 @@
+# Universo de tickers (uno por linea)
+# Ejemplo:
+# AAPL
+# MSFT
+# NVDA
+

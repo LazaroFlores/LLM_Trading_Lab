@@ -1,0 +1,20 @@
+# Tickers que ya tienes en cartera (uno por linea)
+#
+# Nota: para Mexico (BMV), normalmente se usa sufijo `.MX` en yfinance.
+# Confirma el ticker exacto con tu broker/bolsa y colócalo aquí.
+#
+# MX (pendiente de confirmar):
+# FMTY14.MX  # Fibra MTY
+# AUTLANB.MX # AUTLAN B (Compañía Minera)
+
+FMTY14.MX   # Fibra MTY
+AUTLANB.MX  # AUTLAN B (Compañía Minera)
+
+# USA
+KO    # Coca-Cola
+NKE   # Nike
+NVO   # Novo Nordisk
+PEP   # Pepsi
+MELI  # Mercado Libre
+AVAV  # AeroVironment
+RKLB  # Rocket Lab
