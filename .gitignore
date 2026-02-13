@@ -1,4 +1,11 @@
 CLAUDE.md
+
+# Secrets / local environment
+.env
+.env.*
+!.env.example
+!.env.template
+
 venv
 .venv
 .venv*/
