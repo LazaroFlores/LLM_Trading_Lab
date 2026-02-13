@@ -1299,10 +1299,10 @@ def load_latest_portfolio_state(
     except FileNotFoundError as e:
         raise FileNotFoundError(
         f"Could not find portfolio CSV at {PORTFOLIO_CSV_PATH}.\n"
-        "Make sure you're not running trading_script.py directly without the necessary file.\n"
-        "To fix this, either:\n"
-        "  1) Run the wrapper file: 'Start Your Own/ProcessPortfolio.py',\n"
-        "  2) Run: python trading_script.py --data-dir 'Start Your Own'"
+        "Make sure you're passing the correct --data-dir pointing to your csv_files folder.\n"
+        "Example:\n"
+        "  python Experiments/chatgpt_micro-cap/scripts/processing/trading_script.py "
+        "--data-dir Experiments/chatgpt_micro-cap/csv_files --starting-equity 100 --skip"
     ) from e
 
     logger.info("Successfully read CSV file: %s", PORTFOLIO_CSV_PATH)

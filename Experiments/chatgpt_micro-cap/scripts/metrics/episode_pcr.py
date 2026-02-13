@@ -1,10 +1,14 @@
 import pandas as pd
+from pathlib import Path
 
 # -----------------------------
 # Load and prepare data
 # -----------------------------
 
-df = pd.read_csv("Scripts and CSV Files/Daily Updates.csv")
+BASE_DIR = Path(__file__).resolve().parents[2]  # Experiments/chatgpt_micro-cap
+DAILY_UPDATES_CSV = BASE_DIR / "csv_files" / "Daily Updates.csv"
+
+df = pd.read_csv(DAILY_UPDATES_CSV)
 df = df[df["Ticker"] != "TOTAL"]
 
 df["Date"] = pd.to_datetime(df["Date"])

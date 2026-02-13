@@ -3,8 +3,6 @@ import pandas as pd
 import yfinance as yf # type: ignore
 from pathlib import Path
 from data_helper import DAILY_PATH, assemble_path
-DATA_DIR = "Scripts and CSV Files"
-PORTFOLIO_CSV = f"{DATA_DIR}/Daily Updates.csv"
 
 # Save path in project root
 RESULTS_PATH = assemble_path("equity_vs_baseline.png")
@@ -71,7 +69,7 @@ def find_largest_gain(df: pd.DataFrame) -> tuple[pd.Timestamp, pd.Timestamp, flo
             peak_date = date
             continue
 
-        # fall → close previous run
+        # fall -> close previous run
         if val < peak_val:
             gain = (peak_val - min_val) / min_val * 100.0
             if gain > best_gain:
@@ -213,5 +211,5 @@ if __name__ == "__main__":
     dd_d = metrics["max_drawdown_date"].date()
     dd_e = metrics["max_drawdown_equity"]
     dd_p = metrics["max_drawdown_pct"]
-    print(f"Largest run: {ls} → {le}, +{lg:.2f}%")
+    print(f"Largest run: {ls} -> {le}, +{lg:.2f}%")
     print(f"Max drawdown: {dd_p:.2f}% on {dd_d} (equity {dd_e:.2f})")

@@ -1,5 +1,11 @@
 import pandas as pd
 import numpy as np
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parents[2]  # Experiments/chatgpt_micro-cap
+CSV_DIR = BASE_DIR / "csv_files"
+DAILY_UPDATES_CSV = CSV_DIR / "Daily Updates.csv"
+TRADE_LOG_CSV = CSV_DIR / "Trade Log.csv"
 
 # ==========================================================
 # BUILD FIFO LOT-LEVEL REALIZED EXITS
@@ -154,7 +160,7 @@ def compute_trade_metrics(trade_log: pd.DataFrame, exclude_atyr: bool = False):
     top_3_winners = winners.nlargest(3, "PnL")
     top_3_losers = losers.nsmallest(3, "PnL")
     daily_csv = pd.read_csv(
-        "Scripts and CSV Files/Daily Updates.csv",
+        DAILY_UPDATES_CSV,
         parse_dates=["Date"]
     )
     daily_csv = daily_csv[daily_csv["Ticker"] != "TOTAL"]
@@ -197,12 +203,12 @@ def print_results(results: dict):
     print("\n" + "=" * 60)
     print("AVERAGE TICKERS HELD PER DAY")
     print("=" * 60)
-    print(f"{results["avg_tickers_held_per_day"]:.2f}")
+    print(f"{results['avg_tickers_held_per_day']:.2f}")
 
     print("\n" + "=" * 60)
     print("AVERAGE TICKER COST BASIS (USD)")
     print("=" * 60)
-    print(f"{float(results["avg_ticker_cost_basis"]):.2f}")
+    print(f"{float(results['avg_ticker_cost_basis']):.2f}")
 
     print("\n" + "=" * 60)
     print("PURE PnL BY TICKER (ONE ROW PER POSITION)")
@@ -228,7 +234,7 @@ def print_results(results: dict):
 # RUN
 # ==========================================================
 if __name__ == "__main__":
-    trade_log = pd.read_csv("Scripts and CSV Files/Trade Log.csv")
+    trade_log = pd.read_csv(TRADE_LOG_CSV)
     results = compute_trade_metrics(trade_log)
     print_results(results)
     

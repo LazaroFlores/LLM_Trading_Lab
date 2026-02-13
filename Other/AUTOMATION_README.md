@@ -1,6 +1,10 @@
 # Automated Trading System
 
-This system automates the ChatGPT Micro-Cap trading experiment by integrating LLM APIs to generate trading decisions automatically.
+This document describes a **planned** automation layer to integrate LLM APIs for generating trading decisions.
+
+Status (this workspace):
+- The referenced `simple_automation.py` script is **not present** in this repository snapshot.
+- Treat this file as a **design note** for future work (see `TODO.md` in the repo root).
 
 ## Features
 
@@ -32,7 +36,7 @@ export OPENAI_API_KEY="your-openai-api-key"
 
 ## Usage
 
-The `simple_automation.py` script provides automated trading decisions:
+Planned CLI (requires implementing `simple_automation.py`):
 
 ```bash
 # Basic usage with OpenAI
@@ -129,10 +133,10 @@ python simple_automation.py --dry-run
 python simple_automation.py
 
 # 3. Review results
-cat "Start Your Own/llm_responses.jsonl" | tail -1
+cat "llm_responses.jsonl" | tail -1
 
 # 4. Check portfolio updates
-python "Start Your Own/Trading_Script.py"
+python Experiments/chatgpt_micro-cap/scripts/processing/trading_script.py --data-dir Experiments/chatgpt_micro-cap/csv_files --skip
 ```
 
 ## Troubleshooting
