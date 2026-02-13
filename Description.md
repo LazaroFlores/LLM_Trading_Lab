@@ -22,7 +22,7 @@ La carpeta más importante es `Experiments/chatgpt_micro-cap/`:
 - `scripts/processing/trading_script.py`: script central para mantenimiento/registro del portafolio.
   - Descarga precios principalmente desde **Yahoo Finance (yfinance)** y usa **fallback a Stooq** (si está disponible).
   - Soporta modo reproducible "as-of date" (`--asof` o `ASOF_DATE=YYYY-MM-DD`).
-- `graphing/`: scripts para generar gráficos a `images/` (equity vs baseline, drawdown, etc.).
+- `graphing/`: scripts para generar gráficos (por default a `runs/YYYY-MM-DD/plots/`, que está ignorado por git).
 - `evaluation/`: reporte y paper del estudio histórico (`evaluation_report.md`, `paper.pdf`).
 - `collected_artifacts/`: reportes semanales ("Deep Research") y enlaces a conversaciones.
 

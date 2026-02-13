@@ -23,6 +23,7 @@ LLM_Trading_Lab/
 |-- Description.md
 |-- TODO.md
 |-- requirements.txt
+|-- runs/                         # outputs locales (ignorados por git)
 |
 |-- Experiments/
 |   |-- chatgpt_micro-cap/
@@ -37,7 +38,7 @@ LLM_Trading_Lab/
 |       |   |-- metrics/
 |       |
 |       |-- graphing/
-|       |-- images/
+|       |-- images/               # imágenes "fijas" del reporte histórico
 |       |-- evaluation/
 |       |-- collected_artifacts/
 ```
