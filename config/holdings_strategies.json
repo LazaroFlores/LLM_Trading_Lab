@@ -1,6 +1,11 @@
 {
-  "AUTLANB.MX": "candles_book_pdf",
-  "AVAV": "breakout_fast",
-  "KO": "ko_turbo",
-  "MELI": "meli_turbo"
+  "AUTLANB.MX": ["candles_book_pdf", "breakout_fast"],
+  "AVAV": ["breakout_fast", "meli_turbo"],
+  "KO": ["ko_turbo", "pep_defensive_lev"],
+  "MELI": ["meli_turbo", "regime_momentum"],
+  "RKLB": ["rocket_momentum", "meli_turbo"],
+  "NVO": "nvo_growth_turbo",
+  "NKE": "nke_rebound_fib",
+  "PEP": "pep_defensive_lev",
+  "FMTY14.MX": "fmty_income_max"
 }

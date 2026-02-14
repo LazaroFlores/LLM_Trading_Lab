@@ -122,7 +122,7 @@ def _read_ticker_file(path: Path) -> list[str]:
     return list(dict.fromkeys(out))
 
 
-def _read_holdings_strategy_overrides(path: Path) -> dict[str, str]:
+def _read_holdings_strategy_overrides(path: Path) -> dict[str, list[str]]:
     if not path.exists():
         return {}
     try:
@@ -132,13 +132,16 @@ def _read_holdings_strategy_overrides(path: Path) -> dict[str, str]:
     if not isinstance(raw, dict):
         return {}
 
-    out: dict[str, str] = {}
-    for tk, sk in raw.items():
+    out: dict[str, list[str]] = {}
+    for tk, sk_val in raw.items():
         ticker = str(tk).strip().upper()
-        strategy_key = str(sk).strip().lower()
-        if not ticker or not strategy_key:
+        if isinstance(sk_val, list):
+            keys = [str(k).strip().lower() for k in sk_val if str(k).strip()]
+        else:
+            keys = [str(sk_val).strip().lower()]
+        if not ticker or not keys:
             continue
-        out[ticker] = strategy_key
+        out[ticker] = keys
     return out
 
 
@@ -652,6 +655,71 @@ STRATEGY_PROFILES: tuple[HoldingStrategyProfile, ...] = (
         breakout_up_buffer=0.008,
         breakout_down_buffer=0.008,
         leverage=3.0,
+    ),
+    HoldingStrategyProfile(
+        key="rocket_momentum",
+        label="Rocket Momentum",
+        style="regime_momentum",
+        channel_window=20,
+        floor_pct=0.30,
+        ceiling_pct=0.78,
+        fast_sma=20,
+        slow_sma=100,
+        breakout_up_buffer=0.004,
+        breakout_down_buffer=0.004,
+        leverage=3.0,
+    ),
+    HoldingStrategyProfile(
+        key="nvo_growth_turbo",
+        label="NVO Growth Turbo",
+        style="ko_turbo",
+        channel_window=30,
+        floor_pct=0.35,
+        ceiling_pct=0.90,
+        fast_sma=13,
+        slow_sma=55,
+        breakout_up_buffer=0.003,
+        breakout_down_buffer=0.009,
+        leverage=2.5,
+    ),
+    HoldingStrategyProfile(
+        key="nke_rebound_fib",
+        label="NKE Rebound Fib",
+        style="ko_fib618",
+        channel_window=55,
+        floor_pct=0.28,
+        ceiling_pct=0.86,
+        fast_sma=21,
+        slow_sma=89,
+        breakout_up_buffer=0.004,
+        breakout_down_buffer=0.004,
+        leverage=2.0,
+    ),
+    HoldingStrategyProfile(
+        key="pep_defensive_lev",
+        label="PEP Defensive Lev",
+        style="hybrid",
+        channel_window=55,
+        floor_pct=0.27,
+        ceiling_pct=0.75,
+        fast_sma=50,
+        slow_sma=200,
+        breakout_up_buffer=0.005,
+        breakout_down_buffer=0.005,
+        leverage=2.0,
+    ),
+    HoldingStrategyProfile(
+        key="fmty_income_max",
+        label="FMTY Income Max",
+        style="mean_reversion",
+        channel_window=40,
+        floor_pct=0.18,
+        ceiling_pct=0.82,
+        fast_sma=30,
+        slow_sma=120,
+        breakout_up_buffer=0.008,
+        breakout_down_buffer=0.008,
+        leverage=1.5,
     ),
 )
 STRATEGY_PROFILE_BY_KEY: dict[str, HoldingStrategyProfile] = {p.key: p for p in STRATEGY_PROFILES}
@@ -1527,43 +1595,48 @@ def build_holdings_actions(
         hist = data.get(t)
         sl = stop_losses.get(t)
         ohlc = _prepare_ohlc(hist if isinstance(hist, pd.DataFrame) else pd.DataFrame())
-        profile, plan = _select_profile_for_ticker(
-            ticker=t,
-            ohlc=ohlc,
-            backtest_days=backtest_days,
-            target_return=target_return,
-            forced_profile_key=strategy_overrides.get(t.upper()),
-        )
-        plans.append(plan)
-        ind = _channel_indicators(ohlc, profile=profile) if not ohlc.empty else pd.DataFrame()
-        out.append(_holding_action_from_channels(ticker=t, ind=ind, stop_loss=sl, profile=profile))
-        bt_row = _backtest_channel_1y(
-            ticker=t,
-            ind=ind,
-            backtest_days=backtest_days,
-            initial_capital=cap0,
-            profile=profile,
-            target_return=target_return,
-        )
-        if bt_row is not None:
-            bt.append(bt_row)
+        
+        # Get list of strategies to run for this ticker
+        forced_keys = strategy_overrides.get(t.upper(), [None]) # list with None means use auto-select
+        
+        for skey in forced_keys:
+            profile, plan = _select_profile_for_ticker(
+                ticker=t,
+                ohlc=ohlc,
+                backtest_days=backtest_days,
+                target_return=target_return,
+                forced_profile_key=skey,
+            )
+            plans.append(plan)
+            ind = _channel_indicators(ohlc, profile=profile) if not ohlc.empty else pd.DataFrame()
+            out.append(_holding_action_from_channels(ticker=t, ind=ind, stop_loss=sl, profile=profile))
+            bt_row = _backtest_channel_1y(
+                ticker=t,
+                ind=ind,
+                backtest_days=backtest_days,
+                initial_capital=cap0,
+                profile=profile,
+                target_return=target_return,
+            )
+            if bt_row is not None:
+                bt.append(bt_row)
 
-        ts = _build_strategy_timeseries(
-            ind=ind,
-            backtest_days=backtest_days,
-            initial_capital=cap0,
-            profile=profile,
-        )
-        if not ts.empty:
-            trade_logs.append(_build_daily_trade_log(ticker=t, asof=asof, ts=ts))
-            if plot_dir is not None:
-                safe_name = re.sub(r"[^A-Z0-9._-]", "_", t.upper())
-                _save_holding_plot(
-                    ticker=t,
-                    ts=ts,
-                    out_path=plot_dir / f"{safe_name}_strategy.png",
-                    strategy_label=profile.label,
-                )
+            ts = _build_strategy_timeseries(
+                ind=ind,
+                backtest_days=backtest_days,
+                initial_capital=cap0,
+                profile=profile,
+            )
+            if not ts.empty:
+                trade_logs.append(_build_daily_trade_log(ticker=t, asof=asof, ts=ts))
+                if plot_dir is not None:
+                    safe_name = re.sub(r"[^A-Z0-9._-]", "_", t.upper())
+                    _save_holding_plot(
+                        ticker=t,
+                        ts=ts,
+                        out_path=plot_dir / f"{safe_name}_{profile.key}_strategy.png",
+                        strategy_label=profile.label,
+                    )
 
     if trade_logs:
         trade_log_df = pd.concat(trade_logs, axis=0, ignore_index=True)
