@@ -17,8 +17,24 @@ import yfinance as yf  # type: ignore
 
 DEFAULT_UNIVERSE_PATH = Path("config/universe.txt")
 DEFAULT_HOLDINGS_PATH = Path("config/holdings.txt")
+DEFAULT_HOLDINGS_STRATEGIES_PATH = Path("config/holdings_strategies.json")
 DEFAULT_OUTPUT_DIR = Path("runs")
 DEFAULT_DAILY_UPDATES_CSV = Path("Experiments/chatgpt_micro-cap/csv_files/Daily Updates.csv")
+
+
+def _init_yfinance_cache(cache_dir: Path) -> None:
+    """
+    yfinance maintains sqlite caches under platformdirs' user cache dir.
+    In sandboxed environments that path may be read-only, causing downloads to fail.
+    """
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        import yfinance.cache as yf_cache  # type: ignore
+
+        yf_cache.set_cache_location(str(cache_dir))
+    except Exception:
+        # Best-effort only; yfinance will still work if its default cache is writable.
+        pass
 
 
 def _best_effort_utf8_stdout() -> None:
@@ -105,6 +121,27 @@ def _read_ticker_file(path: Path) -> list[str]:
     # stable order, drop duplicates
     return list(dict.fromkeys(out))
 
+
+def _read_holdings_strategy_overrides(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+
+    out: dict[str, str] = {}
+    for tk, sk in raw.items():
+        ticker = str(tk).strip().upper()
+        strategy_key = str(sk).strip().lower()
+        if not ticker or not strategy_key:
+            continue
+        out[ticker] = strategy_key
+    return out
+
+
 def _normalize_tickers(series: pd.Series) -> list[str]:
     s = series.astype(str).str.strip().str.upper()
     s = s.replace({"": np.nan, "NAN": np.nan})
@@ -181,16 +218,19 @@ def _download_history(
 
     # yfinance end is exclusive
     end = end_inclusive + timedelta(days=1)
-    # Batch download; returns MultiIndex columns when multiple tickers
-    df = yf.download(
-        tickers=tickers,
-        start=start.isoformat(),
-        end=end.isoformat(),
-        auto_adjust=True,
-        progress=False,
-        threads=True,
-        group_by="ticker",
-    )
+    try:
+        # Batch download; returns MultiIndex columns when multiple tickers
+        df = yf.download(
+            tickers=tickers,
+            start=start.isoformat(),
+            end=end.isoformat(),
+            auto_adjust=True,
+            progress=False,
+            threads=True,
+            group_by="ticker",
+        )
+    except Exception:
+        return {}
 
     out: dict[str, pd.DataFrame] = {}
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
@@ -356,6 +396,7 @@ class HoldingAction:
     close: float
     stop_loss: float | None
     reason: str
+    strategy: str = "canal_hibrido"
 
 
 @dataclass(frozen=True)
@@ -368,42 +409,292 @@ class HoldingBacktest:
     buy_hold_return_1y: float
     max_drawdown_1y: float
     trades_1y: int
+    strategy: str = "canal_hibrido"
+    strategy_leverage: float = 1.0
+    target_return_1y: float = 0.20
+    target_met_1y: bool = False
+
+
+@dataclass(frozen=True)
+class HoldingStrategyProfile:
+    key: str
+    label: str
+    style: str  # breakout | pullback | hybrid | mean_reversion | regime_momentum | ko_turbo | ko_fib618 | ko_candles_book | candles_book_pure | candles_book_context_min | channel_reversal | channel_pivot_reversal | pivot_reversal
+    channel_window: int
+    floor_pct: float
+    ceiling_pct: float
+    fast_sma: int
+    slow_sma: int
+    breakout_up_buffer: float
+    breakout_down_buffer: float
+    leverage: float = 1.0
+    pivot_left: int = 7
+    pivot_right: int = 3
+
+
+@dataclass(frozen=True)
+class HoldingStrategyPlan:
+    ticker: str
+    strategy_key: str
+    strategy_label: str
+    strategy_style: str
+    annualized_volatility: float | None
+    train_return: float | None
+    train_max_drawdown: float | None
+    train_trades: int
+    target_return: float
+    target_met: bool
+    forced: bool = False
+
+
+STRATEGY_PROFILES: tuple[HoldingStrategyProfile, ...] = (
+    HoldingStrategyProfile(
+        key="breakout_fast",
+        label="Breakout Rapido",
+        style="breakout",
+        channel_window=20,
+        floor_pct=0.20,
+        ceiling_pct=0.80,
+        fast_sma=20,
+        slow_sma=100,
+        breakout_up_buffer=0.006,
+        breakout_down_buffer=0.006,
+    ),
+    HoldingStrategyProfile(
+        key="breakout_swing",
+        label="Breakout Swing",
+        style="breakout",
+        channel_window=34,
+        floor_pct=0.22,
+        ceiling_pct=0.78,
+        fast_sma=30,
+        slow_sma=150,
+        breakout_up_buffer=0.004,
+        breakout_down_buffer=0.004,
+    ),
+    HoldingStrategyProfile(
+        key="pullback_trend",
+        label="Pullback Tendencial",
+        style="pullback",
+        channel_window=55,
+        floor_pct=0.35,
+        ceiling_pct=0.72,
+        fast_sma=50,
+        slow_sma=200,
+        breakout_up_buffer=0.005,
+        breakout_down_buffer=0.005,
+    ),
+    HoldingStrategyProfile(
+        key="hybrid_channel",
+        label="Canal Hibrido",
+        style="hybrid",
+        channel_window=55,
+        floor_pct=0.27,
+        ceiling_pct=0.75,
+        fast_sma=50,
+        slow_sma=200,
+        breakout_up_buffer=0.005,
+        breakout_down_buffer=0.005,
+    ),
+    HoldingStrategyProfile(
+        key="mean_reversion",
+        label="Mean Reversion",
+        style="mean_reversion",
+        channel_window=40,
+        floor_pct=0.18,
+        ceiling_pct=0.82,
+        fast_sma=30,
+        slow_sma=120,
+        breakout_up_buffer=0.008,
+        breakout_down_buffer=0.008,
+    ),
+    HoldingStrategyProfile(
+        key="mx_defensive",
+        label="MX Defensiva",
+        style="pullback",
+        channel_window=70,
+        floor_pct=0.30,
+        ceiling_pct=0.78,
+        fast_sma=40,
+        slow_sma=180,
+        breakout_up_buffer=0.006,
+        breakout_down_buffer=0.006,
+    ),
+    HoldingStrategyProfile(
+        key="regime_momentum",
+        label="Regime Momentum",
+        style="regime_momentum",
+        channel_window=45,
+        floor_pct=0.30,
+        ceiling_pct=0.78,
+        fast_sma=21,
+        slow_sma=89,
+        breakout_up_buffer=0.004,
+        breakout_down_buffer=0.004,
+    ),
+    HoldingStrategyProfile(
+        key="ko_turbo",
+        label="KO Turbo",
+        style="ko_turbo",
+        channel_window=30,
+        floor_pct=0.35,
+        ceiling_pct=0.90,
+        fast_sma=13,
+        slow_sma=55,
+        breakout_up_buffer=0.003,
+        breakout_down_buffer=0.009,
+        leverage=2.5,
+    ),
+    HoldingStrategyProfile(
+        key="ko_fib618",
+        label="KO Fib 61.8",
+        style="ko_fib618",
+        channel_window=55,
+        floor_pct=0.28,
+        ceiling_pct=0.86,
+        fast_sma=21,
+        slow_sma=89,
+        breakout_up_buffer=0.004,
+        breakout_down_buffer=0.004,
+        leverage=2.5,
+    ),
+    HoldingStrategyProfile(
+        key="ko_channel_reversal",
+        label="KO Canal Reversal",
+        style="channel_reversal",
+        channel_window=55,
+        floor_pct=0.22,
+        ceiling_pct=0.78,
+        fast_sma=21,
+        slow_sma=89,
+        breakout_up_buffer=0.004,
+        breakout_down_buffer=0.004,
+        leverage=2.5,
+    ),
+    HoldingStrategyProfile(
+        key="ko_channel_pivots",
+        label="KO Canal + Pivots",
+        style="channel_pivot_reversal",
+        channel_window=55,
+        floor_pct=0.22,
+        ceiling_pct=0.78,
+        fast_sma=21,
+        slow_sma=89,
+        breakout_up_buffer=0.004,
+        breakout_down_buffer=0.004,
+        leverage=2.5,
+        pivot_left=7,
+        pivot_right=3,
+    ),
+    HoldingStrategyProfile(
+        key="ko_candles_book",
+        label="KO Velas (eBook)",
+        style="ko_candles_book",
+        channel_window=55,
+        floor_pct=0.26,
+        ceiling_pct=0.74,
+        fast_sma=21,
+        slow_sma=89,
+        breakout_up_buffer=0.004,
+        breakout_down_buffer=0.004,
+        leverage=2.5,
+    ),
+    HoldingStrategyProfile(
+        key="candles_book_pdf",
+        label="Velas PDF (Puro)",
+        style="candles_book_pure",
+        channel_window=55,
+        floor_pct=0.25,
+        ceiling_pct=0.75,
+        fast_sma=21,
+        slow_sma=89,
+        breakout_up_buffer=0.004,
+        breakout_down_buffer=0.004,
+        leverage=1.5,
+    ),
+    HoldingStrategyProfile(
+        key="candles_book_pdf_ctx",
+        label="Velas PDF + Contexto",
+        style="candles_book_context_min",
+        channel_window=55,
+        floor_pct=0.30,
+        ceiling_pct=0.70,
+        fast_sma=21,
+        slow_sma=89,
+        breakout_up_buffer=0.004,
+        breakout_down_buffer=0.004,
+        leverage=1.5,
+    ),
+    HoldingStrategyProfile(
+        key="ko_pivot_reversal",
+        label="KO Pivots Locales",
+        style="pivot_reversal",
+        channel_window=55,
+        floor_pct=0.45,
+        ceiling_pct=0.55,
+        fast_sma=21,
+        slow_sma=89,
+        breakout_up_buffer=0.004,
+        breakout_down_buffer=0.004,
+        leverage=2.5,
+        pivot_left=7,
+        pivot_right=3,
+    ),
+    HoldingStrategyProfile(
+        key="meli_turbo",
+        label="MELI Turbo",
+        style="mean_reversion",
+        channel_window=40,
+        floor_pct=0.18,
+        ceiling_pct=0.82,
+        fast_sma=30,
+        slow_sma=120,
+        breakout_up_buffer=0.008,
+        breakout_down_buffer=0.008,
+        leverage=3.0,
+    ),
+)
+STRATEGY_PROFILE_BY_KEY: dict[str, HoldingStrategyProfile] = {p.key: p for p in STRATEGY_PROFILES}
+DEFAULT_PROFILE_KEY = "hybrid_channel"
 
 
 def _prepare_ohlc(hist: pd.DataFrame) -> pd.DataFrame:
     if hist is None or hist.empty:
         return pd.DataFrame()
-    cols = ["Close", "High", "Low"]
-    if not all(c in hist.columns for c in cols):
+    base_cols = ["Close", "High", "Low"]
+    if not all(c in hist.columns for c in base_cols):
         return pd.DataFrame()
-    out = hist[cols].copy()
-    for c in cols:
+    cols = ["Open", "Close", "High", "Low"]
+    keep = [c for c in cols if c in hist.columns]
+    out = hist[keep].copy()
+    for c in keep:
         out[c] = pd.to_numeric(out[c], errors="coerce")
-    out = out.dropna(subset=cols).sort_index()
+    out = out.dropna(subset=base_cols).sort_index()
     return out
 
 
 def _channel_indicators(
     ohlc: pd.DataFrame,
-    channel_window: int = 55,
-    floor_pct: float = 0.25,
-    ceiling_pct: float = 0.75,
+    profile: HoldingStrategyProfile | None = None,
 ) -> pd.DataFrame:
+    p = profile or STRATEGY_PROFILE_BY_KEY[DEFAULT_PROFILE_KEY]
     d = ohlc.copy()
-    d["sma50"] = d["Close"].rolling(50, min_periods=50).mean()
-    d["sma200"] = d["Close"].rolling(200, min_periods=200).mean()
-    d["channel_high"] = d["High"].rolling(channel_window, min_periods=channel_window).max()
-    d["channel_low"] = d["Low"].rolling(channel_window, min_periods=channel_window).min()
+    d["sma_fast"] = d["Close"].rolling(p.fast_sma, min_periods=p.fast_sma).mean()
+    d["sma_slow"] = d["Close"].rolling(p.slow_sma, min_periods=p.slow_sma).mean()
+    d["sma50"] = d["sma_fast"]
+    d["sma200"] = d["sma_slow"]
+    d["channel_high"] = d["High"].rolling(p.channel_window, min_periods=p.channel_window).max()
+    d["channel_low"] = d["Low"].rolling(p.channel_window, min_periods=p.channel_window).min()
     width = (d["channel_high"] - d["channel_low"]).clip(lower=np.nan)
     d["channel_width"] = width
     d["zone"] = (d["Close"] - d["channel_low"]) / d["channel_width"]
 
-    d["trend_up"] = (d["sma50"] > d["sma200"]) & (d["Close"] > d["sma50"])
-    d["trend_down"] = (d["sma50"] < d["sma200"]) & (d["Close"] < d["sma50"])
+    d["trend_up"] = (d["sma_fast"] > d["sma_slow"]) & (d["Close"] > d["sma_fast"])
+    d["trend_down"] = (d["sma_fast"] < d["sma_slow"]) & (d["Close"] < d["sma_fast"])
 
     # Breakouts use previous channel to avoid same-bar lookahead.
-    d["breakout_up"] = d["Close"] > (d["channel_high"].shift(1) * 1.005)
-    d["breakout_down"] = d["Close"] < (d["channel_low"].shift(1) * 0.995)
+    d["breakout_up"] = d["Close"] > (d["channel_high"].shift(1) * (1.0 + p.breakout_up_buffer))
+    d["breakout_down"] = d["Close"] < (d["channel_low"].shift(1) * (1.0 - p.breakout_down_buffer))
 
     # Fibonacci retracements over the rolling channel range.
     d["fib_236"] = d["channel_high"] - (d["channel_width"] * 0.236)
@@ -416,27 +707,546 @@ def _channel_indicators(
     d["fib_momo_up"] = d["Close"] >= d["fib_500"]
     d["fib_momo_down"] = d["Close"] <= d["fib_500"]
 
-    d["near_floor"] = d["zone"] <= floor_pct
-    d["near_ceiling"] = d["zone"] >= ceiling_pct
-    d["exit_long"] = (d["Close"] < d["channel_low"] * 0.995) | (d["Close"] < d["fib_786"] * 0.995) | (d["breakout_down"] & d["trend_down"])
-    d["exit_short"] = (d["Close"] > d["channel_high"] * 1.005) | (d["Close"] > d["fib_236"] * 1.005) | (d["breakout_up"] & d["trend_up"])
+    d["near_floor"] = d["zone"] <= p.floor_pct
+    d["near_ceiling"] = d["zone"] >= p.ceiling_pct
+    d["exit_long"] = (
+        (d["Close"] < d["channel_low"] * (1.0 - p.breakout_down_buffer))
+        | (d["Close"] < d["fib_786"] * (1.0 - p.breakout_down_buffer))
+        | (d["breakout_down"] & d["trend_down"])
+    )
+    d["exit_short"] = (
+        (d["Close"] > d["channel_high"] * (1.0 + p.breakout_up_buffer))
+        | (d["Close"] > d["fib_236"] * (1.0 + p.breakout_up_buffer))
+        | (d["breakout_up"] & d["trend_up"])
+    )
+
+    delta = d["Close"].diff()
+    gain = delta.clip(lower=0.0)
+    loss = (-delta).clip(lower=0.0)
+    avg_gain = gain.ewm(alpha=1.0 / 14.0, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1.0 / 14.0, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    d["rsi14"] = 100.0 - (100.0 / (1.0 + rs))
+
+    d["strategy_profile_key"] = p.key
+    d["strategy_profile_label"] = p.label
+
+    # Local pivots (floors/ceilings) confirmed after pivot_right bars (no lookahead at signal time).
+    # A pivot low/high is defined at the center of a (L+R+1) window; we act when it's confirmed.
+    w = int(max(3, (int(p.pivot_left) + int(p.pivot_right) + 1)))
+    if w >= 3 and int(p.pivot_left) >= 1 and int(p.pivot_right) >= 1:
+        low_roll = d["Low"].rolling(w, center=True, min_periods=w).min()
+        high_roll = d["High"].rolling(w, center=True, min_periods=w).max()
+        pivot_low_center = (d["Low"] == low_roll)
+        pivot_high_center = (d["High"] == high_roll)
+        # Use pandas nullable boolean to avoid dtype downcast warnings on fillna.
+        d["pivot_low"] = pivot_low_center.shift(int(p.pivot_right)).astype("boolean").fillna(False).astype(bool)
+        d["pivot_high"] = pivot_high_center.shift(int(p.pivot_right)).astype("boolean").fillna(False).astype(bool)
+    else:
+        d["pivot_low"] = False
+        d["pivot_high"] = False
     return d
+
+
+def _signals_from_profile(ind: pd.DataFrame, profile: HoldingStrategyProfile) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    idx = ind.index
+    empty_false = pd.Series(False, index=idx)
+    if ind.empty:
+        return empty_false, empty_false, empty_false, pd.Series(index=idx, dtype="object")
+
+    zone = pd.to_numeric(ind["zone"], errors="coerce").fillna(0.5)
+    trend_up = ind["trend_up"].fillna(False)
+    trend_down = ind["trend_down"].fillna(False)
+    near_floor = ind["near_floor"].fillna(False)
+    near_ceiling = ind["near_ceiling"].fillna(False)
+    fib_support = ind["fib_support"].fillna(False)
+    fib_resistance = ind["fib_resistance"].fillna(False)
+    fib_momo_up = ind["fib_momo_up"].fillna(False)
+    fib_momo_down = ind["fib_momo_down"].fillna(False)
+    breakout_up = ind["breakout_up"].fillna(False)
+    breakout_down = ind["breakout_down"].fillna(False)
+    exit_long = ind["exit_long"].fillna(False)
+    channel_high = pd.to_numeric(ind.get("channel_high"), errors="coerce")
+    channel_low = pd.to_numeric(ind.get("channel_low"), errors="coerce")
+    pivot_low = ind.get("pivot_low", pd.Series(False, index=idx)).fillna(False)
+    pivot_high = ind.get("pivot_high", pd.Series(False, index=idx)).fillna(False)
+    rsi14 = (
+        pd.to_numeric(ind["rsi14"], errors="coerce")
+        if "rsi14" in ind.columns
+        else pd.Series(np.nan, index=idx, dtype=float)
+    )
+    close = pd.to_numeric(ind["Close"], errors="coerce")
+    open_ = pd.to_numeric(ind.get("Open"), errors="coerce") if "Open" in ind.columns else pd.Series(np.nan, index=idx)
+    high_ = pd.to_numeric(ind.get("High"), errors="coerce") if "High" in ind.columns else pd.Series(np.nan, index=idx)
+    low_ = pd.to_numeric(ind.get("Low"), errors="coerce") if "Low" in ind.columns else pd.Series(np.nan, index=idx)
+    fib_618 = (
+        pd.to_numeric(ind["fib_618"], errors="coerce")
+        if "fib_618" in ind.columns
+        else pd.Series(np.nan, index=idx, dtype=float)
+    )
+    mom_20 = close.pct_change(20)
+    mom_63 = close.pct_change(63)
+
+    breakout_buy = breakout_up & trend_up
+    breakout_sell = breakout_down & trend_down
+    pullback_buy = (near_floor | fib_support) & trend_up
+    pullback_sell = (near_ceiling | fib_resistance) & trend_down
+    momentum_buy = fib_momo_up & trend_up & (zone >= 0.55)
+    momentum_sell = fib_momo_down & trend_down & (zone <= 0.45)
+    mean_buy = (near_floor | fib_support) & (rsi14 <= 38.0)
+    mean_sell = (near_ceiling | fib_resistance) & (rsi14 >= 62.0)
+    regime_bull = trend_up & (mom_63.fillna(0.0) > 0.0) & (rsi14.fillna(50.0) >= 48.0)
+    regime_entry = regime_bull & (
+        breakout_up
+        | (fib_momo_up & (zone >= 0.56))
+        | ((near_floor | fib_support) & (rsi14 >= 44.0) & (rsi14 <= 60.0))
+    )
+    regime_exit = (
+        breakout_down
+        | (trend_down & fib_momo_down)
+        | (rsi14.fillna(50.0) < 43.0)
+        | ((mom_20.fillna(0.0) < -0.05) & (zone <= 0.42))
+    )
+    turbo_entry = (
+        trend_up
+        | fib_momo_up
+        | (zone >= 0.50)
+        | ((rsi14.fillna(50.0) >= 45.0) & (mom_20.fillna(0.0) >= -0.02))
+    )
+    turbo_exit = (
+        breakout_down
+        & (
+            trend_down
+            | (rsi14.fillna(50.0) < 40.0)
+            | (mom_63.fillna(0.0) < -0.06)
+        )
+    )
+    # KO Fib 61.8: crossover regime around the rolling Fib 61.8% retracement.
+    # Entry on cross above Fib 61.8 with a light momentum filter; exit on cross below.
+    above_618 = close > fib_618
+    below_618 = close < fib_618
+    cross_up_618 = above_618 & (close.shift(1) <= fib_618.shift(1))
+    cross_down_618 = below_618 & (close.shift(1) >= fib_618.shift(1))
+    ko_fib_entry = cross_up_618 & (trend_up | (mom_63.fillna(0.0) > 0.0)) & (mom_20.fillna(0.0) >= -0.03)
+    ko_fib_exit = cross_down_618 & (trend_down | (mom_20.fillna(0.0) < -0.03))
+    exit_long_eff = exit_long
+
+    if profile.style == "breakout":
+        buy_sig = breakout_buy | momentum_buy
+        sell_sig = breakout_sell | momentum_sell
+    elif profile.style == "pullback":
+        buy_sig = pullback_buy | (fib_support & trend_up & (zone <= 0.45))
+        sell_sig = pullback_sell | breakout_sell
+    elif profile.style == "mean_reversion":
+        buy_sig = mean_buy
+        sell_sig = mean_sell | breakout_sell
+    elif profile.style == "regime_momentum":
+        buy_sig = regime_entry
+        sell_sig = regime_exit
+    elif profile.style == "ko_turbo":
+        buy_sig = turbo_entry
+        sell_sig = turbo_exit
+        exit_long_eff = turbo_exit
+    elif profile.style == "ko_fib618":
+        buy_sig = ko_fib_entry
+        sell_sig = ko_fib_exit
+        exit_long_eff = exit_long | ko_fib_exit
+    elif profile.style in {"ko_candles_book", "candles_book_pure", "candles_book_context_min"}:
+        # Candlestick patterns based on the eBook content (Spanish names):
+        # hammer / inverted hammer, hanging man / shooting star, engulfing, harami,
+        # morning/evening star, 3 white soldiers / 3 black crows, marubozu, piercing/dark cloud cover.
+        if open_.isna().all() or high_.isna().all() or low_.isna().all():
+            buy_sig = empty_false
+            sell_sig = empty_false
+            if profile.style in {"candles_book_pure", "candles_book_context_min"}:
+                exit_long_eff = empty_false
+        else:
+            # Candlestick context from recent price direction (independent from SMA channel trend).
+            trend_up_cdl = (close > close.shift(3)).fillna(False)
+            trend_down_cdl = (close < close.shift(3)).fillna(False)
+            body = (close - open_).abs()
+            rng = (high_ - low_).replace(0.0, np.nan)
+            upper = high_ - np.maximum(open_, close)
+            lower = np.minimum(open_, close) - low_
+            body_pct = body / rng
+            upper_pct = upper / rng
+            lower_pct = lower / rng
+            is_bull = close > open_
+            is_bear = close < open_
+
+            # Single-candle reversal patterns
+            doji = body_pct <= 0.10
+            dragonfly_doji = doji & (lower_pct >= 0.60) & (upper_pct <= 0.10)
+            gravestone_doji = doji & (upper_pct >= 0.60) & (lower_pct <= 0.10)
+
+            small_body = body_pct <= 0.25
+            hammer_shape = small_body & (lower >= (2.0 * body)) & (upper <= (0.25 * body))
+            inv_hammer_shape = small_body & (upper >= (2.0 * body)) & (lower <= (0.25 * body))
+            # Context variants
+            hammer = hammer_shape & trend_down_cdl
+            hanging_man = hammer_shape & trend_up_cdl
+            inverted_hammer = inv_hammer_shape & trend_down_cdl
+            shooting_star = inv_hammer_shape & trend_up_cdl
+
+            # Marubozu (continuation/strength)
+            maru = (body_pct >= 0.90) & (upper_pct <= 0.06) & (lower_pct <= 0.06)
+            marubozu_white = maru & is_bull
+            marubozu_black = maru & is_bear
+
+            # Two-candle patterns
+            prev_open = open_.shift(1)
+            prev_close = close.shift(1)
+            prev_high = high_.shift(1)
+            prev_low = low_.shift(1)
+            prev_body = (prev_close - prev_open).abs()
+            prev_rng = (prev_high - prev_low).replace(0.0, np.nan)
+            prev_body_pct = prev_body / prev_rng
+            prev_bull = prev_close > prev_open
+            prev_bear = prev_close < prev_open
+
+            # Pauta envolvente / Toro 180 (bullish engulfing with optional large bodies)
+            bullish_engulf = prev_bear & is_bull & (open_ <= prev_close) & (close >= prev_open)
+            bearish_engulf = prev_bull & is_bear & (open_ >= prev_close) & (close <= prev_open)
+            toro_180 = bullish_engulf & (prev_body_pct >= 0.55) & (body_pct >= 0.55)
+            oso_180 = bearish_engulf & (prev_body_pct >= 0.55) & (body_pct >= 0.55)
+
+            # Harami
+            curr_max = np.maximum(open_, close)
+            curr_min = np.minimum(open_, close)
+            prev_max = np.maximum(prev_open, prev_close)
+            prev_min = np.minimum(prev_open, prev_close)
+            inside_prev_body = (curr_max <= prev_max) & (curr_min >= prev_min)
+            bullish_harami = prev_bear & is_bull & inside_prev_body & (prev_body_pct >= 0.40) & (body_pct <= 0.35)
+            bearish_harami = prev_bull & is_bear & inside_prev_body & (prev_body_pct >= 0.40) & (body_pct <= 0.35)
+
+            # Pauta penetrante (Piercing) / Nube oscura (Dark cloud cover)
+            prev_mid = (prev_open + prev_close) / 2.0
+            piercing = prev_bear & is_bull & (open_ <= prev_low) & (close >= prev_mid) & (close <= prev_open)
+            dark_cloud = prev_bull & is_bear & (open_ >= prev_high) & (close <= prev_mid) & (close >= prev_open)
+
+            # 3-candle patterns: Morning/Evening Star (gaps are ignored; uses body sizes + close location)
+            o2 = open_.shift(2)
+            c2 = close.shift(2)
+            h2 = high_.shift(2)
+            l2 = low_.shift(2)
+            body2 = (c2 - o2).abs()
+            rng2 = (h2 - l2).replace(0.0, np.nan)
+            body2_pct = body2 / rng2
+            is_bear2 = c2 < o2
+            is_bull2 = c2 > o2
+            mid2 = (o2 + c2) / 2.0
+            body1 = (close.shift(1) - open_.shift(1)).abs()
+            rng1 = (high_.shift(1) - low_.shift(1)).replace(0.0, np.nan)
+            body1_pct = body1 / rng1
+            small1 = body1_pct <= 0.25
+            morning_star = is_bear2 & (body2_pct >= 0.55) & small1 & is_bull & (close >= mid2)
+            evening_star = is_bull2 & (body2_pct >= 0.55) & small1 & is_bear & (close <= mid2)
+
+            # 3 soldiers / 3 crows
+            b0 = is_bull
+            b1 = close.shift(1) > open_.shift(1)
+            b2 = close.shift(2) > open_.shift(2)
+            r0 = is_bear
+            r1 = close.shift(1) < open_.shift(1)
+            r2 = close.shift(2) < open_.shift(2)
+            long0 = body_pct >= 0.45
+            long1 = (body1_pct >= 0.45)
+            long2 = (body2_pct >= 0.45)
+            higher_closes = (close > close.shift(1)) & (close.shift(1) > close.shift(2))
+            lower_closes = (close < close.shift(1)) & (close.shift(1) < close.shift(2))
+            open_in_prev_body = (open_ >= np.minimum(open_.shift(1), close.shift(1))) & (open_ <= np.maximum(open_.shift(1), close.shift(1)))
+            open1_in_body2 = (open_.shift(1) >= np.minimum(o2, c2)) & (open_.shift(1) <= np.maximum(o2, c2))
+            three_soldiers = b0 & b1 & b2 & long0 & long1 & long2 & higher_closes & open_in_prev_body & open1_in_body2
+            three_crows = r0 & r1 & r2 & long0 & long1 & long2 & lower_closes & open_in_prev_body & open1_in_body2
+
+            bullish_core = (
+                hammer
+                | inverted_hammer
+                | bullish_engulf
+                | toro_180
+                | bullish_harami
+                | piercing
+                | morning_star
+                | three_soldiers
+                | marubozu_white
+            )
+            bearish_core = (
+                hanging_man
+                | shooting_star
+                | bearish_engulf
+                | oso_180
+                | bearish_harami
+                | dark_cloud
+                | evening_star
+                | three_crows
+                | marubozu_black
+            )
+
+            # Doji variants are treated as "alert" patterns; require confirmation candle the next session.
+            dragonfly_confirm = dragonfly_doji.shift(1).astype("boolean").fillna(False).astype(bool) & is_bull
+            gravestone_confirm = gravestone_doji.shift(1).astype("boolean").fillna(False).astype(bool) & is_bear
+
+            bullish = bullish_core | dragonfly_confirm
+            bearish = bearish_core | gravestone_confirm
+
+            if profile.style == "ko_candles_book":
+                # Hybrid mode: candlesticks + channel/trend context.
+                buy_sig = bullish & (trend_down | ind["near_floor"].fillna(False) | (zone <= 0.35))
+                sell_sig = bearish & (trend_up | ind["near_ceiling"].fillna(False) | (zone >= 0.65))
+            elif profile.style == "candles_book_context_min":
+                # Minimal context: lightweight regime+location filter and a simple protective stop.
+                # Keeps the strategy mostly candle-driven while reducing high-frequency noise.
+                buy_sig = bullish & (trend_down_cdl | (zone <= 0.50))
+                sell_sig = bearish & (trend_up_cdl | (zone >= 0.50))
+                exit_long_eff = (
+                    (close < (channel_low * (1.0 - float(profile.breakout_down_buffer))))
+                    | (mom_20.fillna(0.0) < -0.08)
+                ).fillna(False)
+            else:
+                # Pure mode: use only candlestick patterns from the PDF.
+                buy_sig = bullish
+                sell_sig = bearish
+                exit_long_eff = empty_false
+    elif profile.style == "channel_reversal":
+        # Pure channel logic (no Fibonacci):
+        # - Buy near channel low
+        # - Sell near channel high
+        # - Extra protection: exit if price breaks below channel low (buffered)
+        exit_long_channel = (
+            (close < (channel_low * (1.0 - float(profile.breakout_down_buffer))))
+            | (breakout_down & trend_down)
+        ).fillna(False)
+        buy_sig = near_floor
+        sell_sig = near_ceiling | exit_long_channel
+        exit_long_eff = exit_long_channel
+    elif profile.style == "channel_pivot_reversal":
+        # Strict: require pivots at the channel boundaries.
+        exit_long_channel = (
+            (close < (channel_low * (1.0 - float(profile.breakout_down_buffer))))
+            | (breakout_down & trend_down)
+        ).fillna(False)
+        buy_sig = pivot_low & near_floor
+        sell_sig = (pivot_high & near_ceiling) | exit_long_channel
+        exit_long_eff = exit_long_channel
+    elif profile.style == "pivot_reversal":
+        # Buy on confirmed local pivot low, sell on confirmed local pivot high.
+        # Optional gating using zone to avoid buying pivots that happen too high in the channel.
+        exit_long_channel = (
+            (close < (channel_low * (1.0 - float(profile.breakout_down_buffer))))
+            | (breakout_down & trend_down)
+        ).fillna(False)
+        buy_sig = pivot_low & near_floor
+        sell_sig = (pivot_high & near_ceiling) | exit_long_channel
+        exit_long_eff = exit_long_channel
+    else:
+        buy_sig = pullback_buy | breakout_buy | momentum_buy
+        sell_sig = pullback_sell | breakout_sell | momentum_sell
+
+    buy_sig = buy_sig.fillna(False)
+    sell_sig = (sell_sig | exit_long_eff).fillna(False)
+    signal = pd.Series(
+        np.where(
+            buy_sig & ~sell_sig,
+            "BUY",
+            np.where(sell_sig & ~buy_sig, "SELL", "HOLD"),
+        ),
+        index=idx,
+    )
+    return buy_sig, sell_sig, exit_long_eff.fillna(False), signal
+
+
+def _long_only_state_from_signals(
+    buy_sig: pd.Series,
+    sell_sig: pd.Series,
+    exit_long: pd.Series,
+) -> pd.Series:
+    n = len(buy_sig)
+    state = np.zeros(n, dtype=int)
+    for i in range(1, n):
+        prev = state[i - 1]
+        b = bool(buy_sig.iloc[i])
+        s = bool(sell_sig.iloc[i])
+        xl = bool(exit_long.iloc[i])
+        new_state = prev
+        if prev == 0 and b:
+            new_state = 1
+        elif prev == 1 and (s or xl):
+            new_state = 0
+        state[i] = new_state
+    return pd.Series(state, index=buy_sig.index, dtype=float)
+
+
+def _candidate_profile_keys_for_ticker(ticker: str, ohlc: pd.DataFrame) -> list[str]:
+    t = ticker.strip().upper()
+    if t == "KO":
+        return ["ko_channel_pivots", "ko_candles_book", "ko_channel_reversal", "ko_turbo", "regime_momentum", "hybrid_channel", "pullback_trend"]
+    if t == "MELI":
+        return ["meli_turbo", "mean_reversion", "regime_momentum", "hybrid_channel"]
+    close = pd.to_numeric(ohlc.get("Close"), errors="coerce")
+    ret = close.pct_change().dropna()
+    if ret.empty:
+        return [DEFAULT_PROFILE_KEY]
+    ann_vol = float(ret.tail(252).std(ddof=0) * np.sqrt(252.0))
+    if ticker.endswith(".MX"):
+        return ["mx_defensive", "pullback_trend", "hybrid_channel", "regime_momentum"]
+    if ann_vol < 0.22:
+        return ["pullback_trend", "hybrid_channel", "regime_momentum", "mean_reversion"]
+    if ann_vol < 0.42:
+        return ["hybrid_channel", "regime_momentum", "pullback_trend", "breakout_swing"]
+    return ["regime_momentum", "breakout_fast", "breakout_swing", "hybrid_channel"]
+
+
+def _score_training_timeseries(ts: pd.DataFrame) -> tuple[float, float, float, int]:
+    if ts.empty or len(ts) < 40:
+        return float("-inf"), float("nan"), float("nan"), 0
+    eq = pd.to_numeric(ts["strategy_eq"], errors="coerce").dropna()
+    if eq.empty or float(eq.iloc[0]) <= 0:
+        return float("-inf"), float("nan"), float("nan"), 0
+    ret = float(eq.iloc[-1] / eq.iloc[0] - 1.0)
+    max_dd = float((eq / eq.cummax() - 1.0).min())
+    trades = int(pd.to_numeric(ts["state"], errors="coerce").fillna(0.0).diff().abs().fillna(0.0).sum())
+    dd_penalty = abs(min(0.0, max_dd)) * 0.35
+    low_trade_penalty = 0.05 if trades < 2 else 0.0
+    high_trade_penalty = max(0, trades - 30) * 0.004
+    score = ret - dd_penalty - low_trade_penalty - high_trade_penalty
+    return score, ret, max_dd, trades
+
+
+def _select_profile_for_ticker(
+    ticker: str,
+    ohlc: pd.DataFrame,
+    backtest_days: int,
+    target_return: float,
+    forced_profile_key: str | None = None,
+) -> tuple[HoldingStrategyProfile, HoldingStrategyPlan]:
+    default_profile = STRATEGY_PROFILE_BY_KEY[DEFAULT_PROFILE_KEY]
+    close = pd.to_numeric(ohlc.get("Close"), errors="coerce")
+    ret = close.pct_change().dropna()
+    ann_vol = float(ret.tail(252).std(ddof=0) * np.sqrt(252.0)) if not ret.empty else None
+    forced_profile = STRATEGY_PROFILE_BY_KEY.get(str(forced_profile_key).strip().lower()) if forced_profile_key else None
+    if ohlc.empty or len(ohlc) < 260:
+        p = forced_profile or default_profile
+        plan = HoldingStrategyPlan(
+            ticker=ticker,
+            strategy_key=p.key,
+            strategy_label=p.label,
+            strategy_style=p.style,
+            annualized_volatility=ann_vol,
+            train_return=None,
+            train_max_drawdown=None,
+            train_trades=0,
+            target_return=target_return,
+            target_met=False,
+            forced=bool(forced_profile is not None),
+        )
+        return p, plan
+
+    split_n = len(ohlc) - max(120, backtest_days)
+    if split_n < 220:
+        split_n = len(ohlc) - 120
+    train_ohlc = ohlc.iloc[:split_n] if split_n > 220 else ohlc.copy()
+    train_window = min(504, max(220, len(train_ohlc) - 5))
+
+    if forced_profile is not None:
+        train_ind = _channel_indicators(train_ohlc, profile=forced_profile)
+        ts_train = _build_strategy_timeseries(
+            ind=train_ind,
+            backtest_days=train_window,
+            initial_capital=100.0,
+            profile=forced_profile,
+        )
+        _, train_ret, train_dd, train_trades = _score_training_timeseries(ts_train)
+        train_ret_v = train_ret if np.isfinite(train_ret) else None
+        train_dd_v = train_dd if np.isfinite(train_dd) else None
+        plan = HoldingStrategyPlan(
+            ticker=ticker,
+            strategy_key=forced_profile.key,
+            strategy_label=forced_profile.label,
+            strategy_style=forced_profile.style,
+            annualized_volatility=ann_vol if ann_vol is None or np.isfinite(ann_vol) else None,
+            train_return=train_ret_v,
+            train_max_drawdown=train_dd_v,
+            train_trades=int(train_trades),
+            target_return=target_return,
+            target_met=bool(train_ret_v is not None and train_ret_v >= target_return),
+            forced=True,
+        )
+        return forced_profile, plan
+
+    candidate_keys = _candidate_profile_keys_for_ticker(ticker=ticker, ohlc=ohlc)
+
+    best_profile = default_profile
+    best_score = float("-inf")
+    best_train_return = None
+    best_train_dd = None
+    best_train_trades = 0
+
+    for key in candidate_keys:
+        p = STRATEGY_PROFILE_BY_KEY.get(key)
+        if p is None:
+            continue
+        train_ind = _channel_indicators(train_ohlc, profile=p)
+        ts_train = _build_strategy_timeseries(
+            ind=train_ind,
+            backtest_days=train_window,
+            initial_capital=100.0,
+            profile=p,
+        )
+        score, train_ret, train_dd, train_trades = _score_training_timeseries(ts_train)
+        if score > best_score:
+            best_score = score
+            best_profile = p
+            best_train_return = train_ret if np.isfinite(train_ret) else None
+            best_train_dd = train_dd if np.isfinite(train_dd) else None
+            best_train_trades = int(train_trades)
+
+    target_met = bool(best_train_return is not None and best_train_return >= target_return)
+    plan = HoldingStrategyPlan(
+        ticker=ticker,
+        strategy_key=best_profile.key,
+        strategy_label=best_profile.label,
+        strategy_style=best_profile.style,
+        annualized_volatility=ann_vol if ann_vol is None or np.isfinite(ann_vol) else None,
+        train_return=best_train_return,
+        train_max_drawdown=best_train_dd,
+        train_trades=best_train_trades,
+        target_return=target_return,
+        target_met=target_met,
+        forced=False,
+    )
+    return best_profile, plan
 
 
 def _holding_action_from_channels(
     ticker: str,
     ind: pd.DataFrame,
     stop_loss: float | None,
+    profile: HoldingStrategyProfile | None = None,
 ) -> HoldingAction:
+    p = profile or STRATEGY_PROFILE_BY_KEY[DEFAULT_PROFILE_KEY]
     if ind.empty:
-        return HoldingAction(ticker=ticker, action="HOLD", close=float("nan"), stop_loss=stop_loss, reason="sin datos OHLC")
+        return HoldingAction(
+            ticker=ticker,
+            action="HOLD",
+            close=float("nan"),
+            stop_loss=stop_loss,
+            reason="sin datos OHLC",
+            strategy=p.label,
+        )
 
     last = ind.iloc[-1]
     close = float(last["Close"])
     stop_v = float(stop_loss) if stop_loss is not None else None
 
     if not np.isfinite(close):
-        return HoldingAction(ticker=ticker, action="HOLD", close=float("nan"), stop_loss=stop_v, reason="close invalido")
+        return HoldingAction(
+            ticker=ticker,
+            action="HOLD",
+            close=float("nan"),
+            stop_loss=stop_v,
+            reason="close invalido",
+            strategy=p.label,
+        )
 
     if stop_v is not None and stop_v > 0 and close < stop_v:
         return HoldingAction(
@@ -445,76 +1255,48 @@ def _holding_action_from_channels(
             close=close,
             stop_loss=stop_v,
             reason=f"precio < stop_loss ({close:.2f} < {stop_v:.2f})",
+            strategy=p.label,
         )
 
     needed = ["channel_high", "channel_low", "zone", "sma50", "sma200"]
     if any(not np.isfinite(float(last[c])) for c in needed):
-        return HoldingAction(ticker=ticker, action="HOLD", close=close, stop_loss=stop_v, reason="historial insuficiente para canales (>=200d)")
+        return HoldingAction(
+            ticker=ticker,
+            action="HOLD",
+            close=close,
+            stop_loss=stop_v,
+            reason="historial insuficiente para canales (>=200d)",
+            strategy=p.label,
+        )
 
     zone = float(last["zone"])
-    up = bool(last["trend_up"])
-    down = bool(last["trend_down"])
-    breakout_up = bool(last["breakout_up"])
-    breakout_down = bool(last["breakout_down"])
-    near_floor = bool(last["near_floor"])
-    near_ceiling = bool(last["near_ceiling"])
-    fib_support = bool(last["fib_support"])
-    fib_resistance = bool(last["fib_resistance"])
-    fib_momo_up = bool(last["fib_momo_up"])
-    fib_momo_down = bool(last["fib_momo_down"])
-
-    if breakout_down and down:
+    buy_sig, sell_sig, _, signal = _signals_from_profile(ind=ind, profile=p)
+    last_signal = str(signal.iloc[-1]) if len(signal) else "HOLD"
+    if last_signal == "BUY" and bool(buy_sig.iloc[-1]):
+        return HoldingAction(
+            ticker=ticker,
+            action="BUY",
+            close=close,
+            stop_loss=stop_v,
+            reason=f"senal {p.label} ({p.style}) activa (zone={zone:.2f})",
+            strategy=p.label,
+        )
+    if last_signal == "SELL" and bool(sell_sig.iloc[-1]):
         return HoldingAction(
             ticker=ticker,
             action="SELL",
             close=close,
             stop_loss=stop_v,
-            reason=f"ruptura bajista de piso/canal (zone={zone:.2f}); salida defensiva",
-        )
-    if (near_ceiling or fib_resistance) and down:
-        reason = f"techo/canal con sesgo bajista (zone={zone:.2f}); salida defensiva"
-        if fib_resistance:
-            reason = f"resistencia Fibonacci + sesgo bajista (zone={zone:.2f}); salida defensiva"
-        return HoldingAction(
-            ticker=ticker,
-            action="SELL",
-            close=close,
-            stop_loss=stop_v,
-            reason=reason,
-        )
-    if breakout_up and up:
-        return HoldingAction(
-            ticker=ticker,
-            action="BUY",
-            close=close,
-            stop_loss=stop_v,
-            reason=f"ruptura alcista de canal (zone={zone:.2f})",
-        )
-    if (near_floor or fib_support) and up:
-        reason = f"piso/canal con sesgo alcista (zone={zone:.2f})"
-        if fib_support:
-            reason = f"soporte Fibonacci + sesgo alcista (zone={zone:.2f})"
-        return HoldingAction(
-            ticker=ticker,
-            action="BUY",
-            close=close,
-            stop_loss=stop_v,
-            reason=reason,
-        )
-    if fib_momo_up and up and (not fib_momo_down):
-        return HoldingAction(
-            ticker=ticker,
-            action="BUY",
-            close=close,
-            stop_loss=stop_v,
-            reason=f"momentum sobre Fib 50% con sesgo alcista (zone={zone:.2f})",
+            reason=f"salida defensiva {p.label} ({p.style}) (zone={zone:.2f})",
+            strategy=p.label,
         )
     return HoldingAction(
         ticker=ticker,
         action="HOLD",
         close=close,
         stop_loss=stop_v,
-        reason=f"en rango de canal (zone={zone:.2f})",
+        reason=f"sin gatillo {p.label} ({p.style}) (zone={zone:.2f})",
+        strategy=p.label,
     )
 
 
@@ -524,69 +1306,45 @@ def _backtest_channel_1y(
     backtest_days: int = 252,
     fee_bps: float = 0.0,
     initial_capital: float = 100.0,
+    profile: HoldingStrategyProfile | None = None,
+    target_return: float = 0.20,
 ) -> HoldingBacktest | None:
-    if ind.empty or len(ind) < 220:
+    p = profile or STRATEGY_PROFILE_BY_KEY[DEFAULT_PROFILE_KEY]
+    lev = float(p.leverage) if np.isfinite(p.leverage) and p.leverage > 0 else 1.0
+    ts = _build_strategy_timeseries(
+        ind=ind,
+        backtest_days=backtest_days,
+        fee_bps=fee_bps,
+        initial_capital=initial_capital,
+        profile=p,
+    )
+    if ts.empty:
         return None
 
-    d = ind.copy()
-    d = d.dropna(subset=["Close"])
-    if len(d) < 220:
+    eq = pd.to_numeric(ts["strategy_eq"], errors="coerce").dropna()
+    bh = pd.to_numeric(ts["buyhold_eq"], errors="coerce").dropna()
+    if eq.empty or bh.empty:
         return None
 
-    fib_support = d["fib_support"].fillna(False) if "fib_support" in d.columns else pd.Series(False, index=d.index)
-    fib_resistance = d["fib_resistance"].fillna(False) if "fib_resistance" in d.columns else pd.Series(False, index=d.index)
-    fib_momo_up = d["fib_momo_up"].fillna(False) if "fib_momo_up" in d.columns else pd.Series(False, index=d.index)
-    fib_momo_down = d["fib_momo_down"].fillna(False) if "fib_momo_down" in d.columns else pd.Series(False, index=d.index)
-    buy_sig = ((((d["near_floor"] | fib_support | fib_momo_up) & d["trend_up"]) | d["breakout_up"])).fillna(False)
-    sell_sig = ((((d["near_ceiling"] | fib_resistance | fib_momo_down) & d["trend_down"]) | d["breakout_down"])).fillna(False)
-    exit_long = d["exit_long"].fillna(False)
-    exit_short = d["exit_short"].fillna(False)
-
-    state = np.zeros(len(d), dtype=int)
-    for i in range(1, len(d)):
-        prev = state[i - 1]
-        b = bool(buy_sig.iloc[i])
-        s = bool(sell_sig.iloc[i])
-        xl = bool(exit_long.iloc[i])
-        new_state = prev
-        if prev == 0:
-            if b:
-                new_state = 1
-        elif prev == 1:
-            if s or xl:
-                new_state = 0
-        state[i] = new_state
-
-    state_s = pd.Series(state, index=d.index, dtype=float)
-    ret = d["Close"].pct_change().fillna(0.0)
-    strat_ret = state_s.shift(1).fillna(0.0) * ret
-    if fee_bps > 0:
-        turn = state_s.diff().abs().fillna(0.0)
-        strat_ret = strat_ret - (turn * (fee_bps / 10_000.0))
-
-    n = min(backtest_days, len(d))
-    if n <= 2:
-        return None
-
-    strat_slice = strat_ret.iloc[-n:]
-    bh_slice = ret.iloc[-n:]
     cap0 = float(initial_capital) if np.isfinite(initial_capital) and initial_capital > 0 else 100.0
-    eq = cap0 * (1.0 + strat_slice).cumprod()
-    bh = cap0 * (1.0 + bh_slice).cumprod()
-
     max_dd = float((eq / eq.cummax() - 1.0).min())
-    trades_1y = int(state_s.iloc[-n:].diff().abs().fillna(0.0).sum())
+    trades_1y = int(pd.to_numeric(ts["state"], errors="coerce").fillna(0.0).diff().abs().fillna(0.0).sum())
     strat_final = float(eq.iloc[-1])
     bh_final = float(bh.iloc[-1])
+    strat_ret = float((strat_final / cap0) - 1.0)
     return HoldingBacktest(
         ticker=ticker,
         initial_capital_1y=cap0,
         strategy_final_capital_1y=strat_final,
         buy_hold_final_capital_1y=bh_final,
-        strategy_return_1y=float((strat_final / cap0) - 1.0),
+        strategy_return_1y=strat_ret,
         buy_hold_return_1y=float((bh_final / cap0) - 1.0),
         max_drawdown_1y=max_dd,
         trades_1y=trades_1y,
+        strategy=p.label,
+        strategy_leverage=lev,
+        target_return_1y=float(target_return),
+        target_met_1y=bool(strat_ret >= float(target_return)),
     )
 
 
@@ -595,7 +1353,9 @@ def _build_strategy_timeseries(
     backtest_days: int = 252,
     fee_bps: float = 0.0,
     initial_capital: float = 100.0,
+    profile: HoldingStrategyProfile | None = None,
 ) -> pd.DataFrame:
+    p = profile or STRATEGY_PROFILE_BY_KEY[DEFAULT_PROFILE_KEY]
     if ind.empty or len(ind) < 220:
         return pd.DataFrame()
 
@@ -603,33 +1363,15 @@ def _build_strategy_timeseries(
     if len(d) < 220:
         return pd.DataFrame()
 
-    fib_support = d["fib_support"].fillna(False) if "fib_support" in d.columns else pd.Series(False, index=d.index)
-    fib_resistance = d["fib_resistance"].fillna(False) if "fib_resistance" in d.columns else pd.Series(False, index=d.index)
-    fib_momo_up = d["fib_momo_up"].fillna(False) if "fib_momo_up" in d.columns else pd.Series(False, index=d.index)
-    fib_momo_down = d["fib_momo_down"].fillna(False) if "fib_momo_down" in d.columns else pd.Series(False, index=d.index)
-    buy_sig = ((((d["near_floor"] | fib_support | fib_momo_up) & d["trend_up"]) | d["breakout_up"])).fillna(False)
-    sell_sig = ((((d["near_ceiling"] | fib_resistance | fib_momo_down) & d["trend_down"]) | d["breakout_down"])).fillna(False)
-    exit_long = d["exit_long"].fillna(False)
-    exit_short = d["exit_short"].fillna(False)
-
-    state = np.zeros(len(d), dtype=int)
-    for i in range(1, len(d)):
-        prev = state[i - 1]
-        b = bool(buy_sig.iloc[i])
-        s = bool(sell_sig.iloc[i])
-        xl = bool(exit_long.iloc[i])
-        new_state = prev
-        if prev == 0:
-            if b:
-                new_state = 1
-        elif prev == 1:
-            if s or xl:
-                new_state = 0
-        state[i] = new_state
-
-    state_s = pd.Series(state, index=d.index, dtype=float)
+    buy_sig, sell_sig, exit_long, signal = _signals_from_profile(ind=d, profile=p)
+    state_s = _long_only_state_from_signals(
+        buy_sig=buy_sig,
+        sell_sig=sell_sig,
+        exit_long=exit_long,
+    )
+    lev = float(p.leverage) if np.isfinite(p.leverage) and p.leverage > 0 else 1.0
     ret = d["Close"].pct_change().fillna(0.0)
-    strat_ret = state_s.shift(1).fillna(0.0) * ret
+    strat_ret = state_s.shift(1).fillna(0.0) * ret * lev
     if fee_bps > 0:
         turn = state_s.diff().abs().fillna(0.0)
         strat_ret = strat_ret - (turn * (fee_bps / 10_000.0))
@@ -638,14 +1380,6 @@ def _build_strategy_timeseries(
     if n <= 2:
         return pd.DataFrame()
 
-    signal = pd.Series(
-        np.where(
-            buy_sig & ~sell_sig,
-            "BUY",
-            np.where(sell_sig & ~buy_sig, "SELL", "HOLD"),
-        ),
-        index=d.index,
-    )
     signal_code = signal.map({"SELL": -1, "HOLD": 0, "BUY": 1}).astype(float)
 
     out = pd.DataFrame(
@@ -656,12 +1390,17 @@ def _build_strategy_timeseries(
             "state": state_s.iloc[-n:],
             "channel_high": d["channel_high"].iloc[-n:],
             "channel_low": d["channel_low"].iloc[-n:],
+            "pivot_low": d["pivot_low"].iloc[-n:] if "pivot_low" in d.columns else False,
+            "pivot_high": d["pivot_high"].iloc[-n:] if "pivot_high" in d.columns else False,
             "fib_236": d["fib_236"].iloc[-n:] if "fib_236" in d.columns else np.nan,
             "fib_382": d["fib_382"].iloc[-n:] if "fib_382" in d.columns else np.nan,
             "fib_618": d["fib_618"].iloc[-n:] if "fib_618" in d.columns else np.nan,
             "fib_786": d["fib_786"].iloc[-n:] if "fib_786" in d.columns else np.nan,
             "signal": signal.iloc[-n:],
             "signal_code": signal_code.iloc[-n:],
+            "strategy": p.label,
+            "strategy_style": p.style,
+            "strategy_leverage": lev,
         }
     )
     cap0 = float(initial_capital) if np.isfinite(initial_capital) and initial_capital > 0 else 100.0
@@ -670,7 +1409,12 @@ def _build_strategy_timeseries(
     return out
 
 
-def _save_holding_plot(ticker: str, ts: pd.DataFrame, out_path: Path) -> None:
+def _save_holding_plot(
+    ticker: str,
+    ts: pd.DataFrame,
+    out_path: Path,
+    strategy_label: str | None = None,
+) -> None:
     if ts.empty:
         return
 
@@ -688,26 +1432,42 @@ def _save_holding_plot(ticker: str, ts: pd.DataFrame, out_path: Path) -> None:
     if "channel_high" in ts and "channel_low" in ts:
         ax1.plot(ts.index, ts["channel_high"], label="Canal Alto", linewidth=1.0, linestyle="--", color="#d62728", alpha=0.8)
         ax1.plot(ts.index, ts["channel_low"], label="Canal Bajo", linewidth=1.0, linestyle="--", color="#2ca02c", alpha=0.8)
-    if "fib_382" in ts and pd.to_numeric(ts["fib_382"], errors="coerce").notna().any():
-        ax1.plot(ts.index, ts["fib_382"], label="Fib 38.2%", linewidth=0.9, linestyle="-.", color="#8c564b", alpha=0.75)
-    if "fib_618" in ts and pd.to_numeric(ts["fib_618"], errors="coerce").notna().any():
-        ax1.plot(ts.index, ts["fib_618"], label="Fib 61.8%", linewidth=0.9, linestyle="-.", color="#17becf", alpha=0.75)
-    if "signal" in ts:
-        buy_mask = ts["signal"] == "BUY"
-        sell_mask = ts["signal"] == "SELL"
-        hold_mask = ts["signal"] == "HOLD"
-        ax1.scatter(ts.index[buy_mask], ts.loc[buy_mask, "Close"], marker="^", s=40, color="#2ca02c", label="BUY", zorder=4)
-        ax1.scatter(ts.index[sell_mask], ts.loc[sell_mask, "Close"], marker="v", s=40, color="#d62728", label="SELL", zorder=4)
-        ax1.scatter(ts.index[hold_mask], ts.loc[hold_mask, "Close"], marker="o", s=9, color="#7f7f7f", alpha=0.25, label="HOLD", zorder=2)
+    # Some profiles explicitly avoid Fibonacci in both logic and visualization.
+    style = str(ts.get("strategy_style", pd.Series([""])).iloc[-1]) if "strategy_style" in ts else ""
+    show_fib = style not in {
+        "channel_reversal",
+        "channel_pivot_reversal",
+        "pivot_reversal",
+        "candles_book_pure",
+        "candles_book_context_min",
+    }
+    if show_fib:
+        if "fib_382" in ts and pd.to_numeric(ts["fib_382"], errors="coerce").notna().any():
+            ax1.plot(ts.index, ts["fib_382"], label="Fib 38.2%", linewidth=0.9, linestyle="-.", color="#8c564b", alpha=0.75)
+        if "fib_618" in ts and pd.to_numeric(ts["fib_618"], errors="coerce").notna().any():
+            ax1.plot(ts.index, ts["fib_618"], label="Fib 61.8%", linewidth=0.9, linestyle="-.", color="#17becf", alpha=0.75)
+    if "state" in ts:
+        # Plot actual entries/exits (derived from state transitions) instead of raw BUY/SELL signals.
+        state_i = pd.to_numeric(ts["state"], errors="coerce").fillna(0.0).astype(int)
+        prev_state_i = state_i.shift(1).fillna(0).astype(int)
+        buy_mask = (prev_state_i == 0) & (state_i == 1)
+        sell_mask = (prev_state_i == 1) & (state_i == 0)
+        hold_mask = ~(buy_mask | sell_mask)
+
+        ax1.scatter(ts.index[buy_mask], ts.loc[buy_mask, "Close"], marker="^", s=46, color="#2ca02c", label="BUY", zorder=4)
+        ax1.scatter(ts.index[sell_mask], ts.loc[sell_mask, "Close"], marker="v", s=46, color="#d62728", label="SELL", zorder=4)
+        ax1.scatter(ts.index[hold_mask], ts.loc[hold_mask, "Close"], marker="o", s=9, color="#7f7f7f", alpha=0.18, label="HOLD", zorder=2)
+
         buy_count = int(buy_mask.sum())
         sell_count = int(sell_mask.sum())
         hold_count = int(hold_mask.sum())
         counts_label = f"BUY={buy_count} | SELL={sell_count} | HOLD={hold_count}"
-        ax1.set_title(f"{ticker} - Precio, Canal y Senales ({len(ts)} sesiones) [{counts_label}]")
+        strategy_text = f" | {strategy_label}" if strategy_label else ""
+        ax1.set_title(f"{ticker}{strategy_text} - Precio, Canal y Entradas/Salidas ({len(ts)} sesiones) [{counts_label}]")
         ax1.text(
             0.015,
             0.98,
-            f"Senales: {counts_label}",
+            f"Entradas/Salidas: {counts_label}",
             transform=ax1.transAxes,
             va="top",
             ha="left",
@@ -716,7 +1476,7 @@ def _save_holding_plot(ticker: str, ts: pd.DataFrame, out_path: Path) -> None:
             bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.75, "edgecolor": "#aaaaaa"},
         )
     else:
-        ax1.set_title(f"{ticker} - Precio, Canal y Senales ({len(ts)} sesiones)")
+        ax1.set_title(f"{ticker} - Precio, Canal y Entradas/Salidas ({len(ts)} sesiones)")
     ax1.grid(True, alpha=0.25)
     ax1.legend(loc="best")
 
@@ -742,15 +1502,18 @@ def build_holdings_actions(
     holdings: list[str],
     asof: date,
     stop_losses: dict[str, float] | None = None,
-    lookback_days: int = 365 * 3,
+    lookback_days: int = 365 * 5,
     backtest_days: int = 252,
     plot_dir: Path | None = None,
     initial_capital: float = 100.0,
-) -> tuple[list[HoldingAction], list[HoldingBacktest], pd.DataFrame]:
+    target_return: float = 0.20,
+    strategy_overrides: dict[str, str] | None = None,
+) -> tuple[list[HoldingAction], list[HoldingBacktest], pd.DataFrame, list[HoldingStrategyPlan]]:
     if not holdings:
-        return [], [], pd.DataFrame()
+        return [], [], pd.DataFrame(), []
 
     stop_losses = stop_losses or {}
+    strategy_overrides = strategy_overrides or {}
     cap0 = float(initial_capital) if np.isfinite(initial_capital) and initial_capital > 0 else 100.0
     start = asof - timedelta(days=lookback_days)
 
@@ -758,23 +1521,49 @@ def build_holdings_actions(
     out: list[HoldingAction] = []
     bt: list[HoldingBacktest] = []
     trade_logs: list[pd.DataFrame] = []
+    plans: list[HoldingStrategyPlan] = []
 
     for t in holdings:
         hist = data.get(t)
         sl = stop_losses.get(t)
         ohlc = _prepare_ohlc(hist if isinstance(hist, pd.DataFrame) else pd.DataFrame())
-        ind = _channel_indicators(ohlc)
-        out.append(_holding_action_from_channels(ticker=t, ind=ind, stop_loss=sl))
-        bt_row = _backtest_channel_1y(ticker=t, ind=ind, backtest_days=backtest_days, initial_capital=cap0)
+        profile, plan = _select_profile_for_ticker(
+            ticker=t,
+            ohlc=ohlc,
+            backtest_days=backtest_days,
+            target_return=target_return,
+            forced_profile_key=strategy_overrides.get(t.upper()),
+        )
+        plans.append(plan)
+        ind = _channel_indicators(ohlc, profile=profile) if not ohlc.empty else pd.DataFrame()
+        out.append(_holding_action_from_channels(ticker=t, ind=ind, stop_loss=sl, profile=profile))
+        bt_row = _backtest_channel_1y(
+            ticker=t,
+            ind=ind,
+            backtest_days=backtest_days,
+            initial_capital=cap0,
+            profile=profile,
+            target_return=target_return,
+        )
         if bt_row is not None:
             bt.append(bt_row)
 
-        ts = _build_strategy_timeseries(ind=ind, backtest_days=backtest_days, initial_capital=cap0)
+        ts = _build_strategy_timeseries(
+            ind=ind,
+            backtest_days=backtest_days,
+            initial_capital=cap0,
+            profile=profile,
+        )
         if not ts.empty:
             trade_logs.append(_build_daily_trade_log(ticker=t, asof=asof, ts=ts))
             if plot_dir is not None:
                 safe_name = re.sub(r"[^A-Z0-9._-]", "_", t.upper())
-                _save_holding_plot(ticker=t, ts=ts, out_path=plot_dir / f"{safe_name}_strategy.png")
+                _save_holding_plot(
+                    ticker=t,
+                    ts=ts,
+                    out_path=plot_dir / f"{safe_name}_strategy.png",
+                    strategy_label=profile.label,
+                )
 
     if trade_logs:
         trade_log_df = pd.concat(trade_logs, axis=0, ignore_index=True)
@@ -785,6 +1574,7 @@ def build_holdings_actions(
                 "asof",
                 "date",
                 "ticker",
+                "strategy",
                 "close",
                 "signal",
                 "position",
@@ -795,7 +1585,7 @@ def build_holdings_actions(
             ]
         )
 
-    return out, bt, trade_log_df
+    return out, bt, trade_log_df, plans
 
 
 def _action_from_transition(prev_state: int, curr_state: int) -> str:
@@ -835,6 +1625,7 @@ def _build_daily_trade_log(ticker: str, asof: date, ts: pd.DataFrame) -> pd.Data
             "asof": asof.isoformat(),
             "date": pd.to_datetime(out.index).date,
             "ticker": ticker,
+            "strategy": out["strategy"].astype(str) if "strategy" in out.columns else "",
             "close": pd.to_numeric(out["Close"], errors="coerce"),
             "signal": out["signal"].astype(str),
             "position": position.astype(str),
@@ -880,32 +1671,71 @@ def _prompt_float(msg: str) -> float:
             return float(v)
         print("Número inválido. Intenta otra vez.")
 
+def _sanitize_for_json(x: object) -> object:
+    if isinstance(x, float):
+        return x if np.isfinite(x) else None
+    if isinstance(x, np.floating):
+        v = float(x)
+        return v if np.isfinite(v) else None
+    if isinstance(x, dict):
+        return {k: _sanitize_for_json(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_sanitize_for_json(v) for v in x]
+    return x
+
+
+def _safe_run_tag(tag: str | None) -> str:
+    if tag is None:
+        return ""
+    t = str(tag).strip()
+    if not t:
+        return ""
+    t = re.sub(r"[^A-Za-z0-9._-]+", "_", t)
+    t = t.strip("._-")
+    return t[:64]
+
 
 def main() -> int:
     _best_effort_utf8_stdout()
     parser = argparse.ArgumentParser(description="Recomendador simple (Top N + seguimiento holdings).")
     parser.add_argument("--universe", type=str, default=str(DEFAULT_UNIVERSE_PATH), help="Archivo con tickers (uno por línea).")
     parser.add_argument("--holdings", type=str, default=str(DEFAULT_HOLDINGS_PATH), help="Archivo con tickers en cartera (uno por línea).")
+    parser.add_argument("--holdings-strategies", type=str, default=str(DEFAULT_HOLDINGS_STRATEGIES_PATH), help="JSON de estrategia fija por ticker (ej. AVAV->breakout_fast).")
     parser.add_argument("--daily-updates", type=str, default=str(DEFAULT_DAILY_UPDATES_CSV), help="Ruta al Daily Updates.csv (para construir universo/holdings).")
     parser.add_argument("--universe-from-daily", action="store_true", help="Usar Daily Updates.csv como universo (en vez de config/universe.txt).")
     parser.add_argument("--holdings-from-daily", action="store_true", help="Derivar holdings desde el último día en Daily Updates.csv (incluye stop-loss si existe).")
     parser.add_argument("--asof", type=str, default=None, help="Fecha YYYY-MM-DD (default: hoy; si es fin de semana usa viernes).")
     parser.add_argument("--top", type=int, default=5, help="Cantidad de recomendaciones Top N (default: 5).")
     parser.add_argument("--min-dollar-vol", type=float, default=500_000.0, help="Filtro de liquidez: promedio 20d Close*Volume.")
-    parser.add_argument("--holdings-lookback-years", type=int, default=3, help="Lookback para holdings/channels (default: 3 anios).")
+    parser.add_argument("--holdings-lookback-years", type=int, default=5, help="Lookback para holdings/channels (default: 5 anios).")
     parser.add_argument("--backtest-days", type=int, default=252, help="Ventana de backtest para holdings (default: 252).")
     parser.add_argument("--initial-capital", type=float, default=100.0, help="Capital inicial para backtest/equity de holdings (default: 100 USD).")
-    parser.add_argument("--plot-holdings", action="store_true", help="Genera un grafico por holding (precio+canal con marcas BUY/SELL/HOLD y equity curve).")
-    parser.add_argument("--plots-dir", type=str, default=None, help="Directorio de salida para graficos (default: runs/YYYY-MM-DD/plots).")
+    parser.add_argument("--target-return", type=float, default=0.20, help="Objetivo de rendimiento 1Y para holdings (default: 0.20 = +20%%).")
+    parser.add_argument("--plot-holdings", dest="plot_holdings", action="store_true", help="Genera graficos por holding (default: activado).")
+    parser.add_argument("--no-plot-holdings", dest="plot_holdings", action="store_false", help="Desactiva generacion de graficos por holding.")
+    parser.set_defaults(plot_holdings=True)
+    parser.add_argument(
+        "--plots-dir",
+        type=str,
+        default=None,
+        help="Directorio de salida para graficos (default: <out-dir>/YYYY-MM-DD[/<run-tag>]/plots).",
+    )
     parser.add_argument("--non-interactive", action="store_true", help="No preguntar confirmaciones; solo imprime y guarda outputs.")
     parser.add_argument("--out-dir", type=str, default=str(DEFAULT_OUTPUT_DIR), help="Directorio base para outputs (default: runs/).")
+    parser.add_argument("--run-tag", type=str, default="", help="Subcarpeta opcional bajo runs/YYYY-MM-DD/ (evita crear runs_*).")
     args = parser.parse_args()
 
     asof = _coerce_asof(args.asof)
     universe_path = Path(args.universe)
     holdings_path = Path(args.holdings)
+    holdings_strategies_path = Path(args.holdings_strategies)
     daily_updates_path = Path(args.daily_updates)
-    out_dir = Path(args.out_dir) / asof.isoformat()
+    out_root = Path(args.out_dir)
+    run_tag = _safe_run_tag(args.run_tag)
+    out_dir = out_root / asof.isoformat()
+    if run_tag:
+        out_dir = out_dir / run_tag
+    _init_yfinance_cache(out_root / "_yfinance_cache")
 
     if args.universe_from_daily:
         if not daily_updates_path.exists():
@@ -921,6 +1751,7 @@ def main() -> int:
         holdings, stop_losses = holdings_from_daily_updates(daily_updates_path)
     else:
         holdings = _read_ticker_file(holdings_path)
+    strategy_overrides = _read_holdings_strategy_overrides(holdings_strategies_path)
 
     print("\n" + "=" * 72)
     print(f"Recomendaciones (asof={asof.isoformat()})")
@@ -948,7 +1779,8 @@ def main() -> int:
         plot_dir = Path(args.plots_dir) if args.plots_dir else (out_dir / "plots")
 
     initial_capital = float(args.initial_capital) if np.isfinite(args.initial_capital) and args.initial_capital > 0 else 100.0
-    actions, backtests, holdings_trade_log = build_holdings_actions(
+    target_return = float(args.target_return) if np.isfinite(args.target_return) else 0.20
+    actions, backtests, holdings_trade_log, strategy_plans = build_holdings_actions(
         holdings=holdings,
         asof=asof,
         stop_losses=stop_losses,
@@ -956,6 +1788,8 @@ def main() -> int:
         backtest_days=max(60, int(args.backtest_days)),
         plot_dir=plot_dir,
         initial_capital=initial_capital,
+        target_return=target_return,
+        strategy_overrides=strategy_overrides,
     )
     buy_count = int(sum(1 for a in actions if a.action == "BUY"))
     sell_count = int(sum(1 for a in actions if a.action == "SELL"))
@@ -967,25 +1801,40 @@ def main() -> int:
         print("\n[Holdings]")
         for a in actions:
             sl = f"{a.stop_loss:.2f}" if a.stop_loss is not None else "-"
-            print(f"{a.ticker:>10}  {a.action:<4}  close={a.close:>9.2f}  stop={sl:>8}  {a.reason}")
+            print(f"{a.ticker:>10}  {a.action:<4}  strat={a.strategy:<18}  close={a.close:>9.2f}  stop={sl:>8}  {a.reason}")
         print(f"Resumen señales -> BUY={buy_count}  SELL={sell_count}  HOLD={hold_count}")
 
+    if strategy_plans:
+        print(f"\n[Perfiles Holdings | objetivo={target_return:+.1%}]")
+        for plan in strategy_plans:
+            vol_txt = f"{plan.annualized_volatility:.1%}" if plan.annualized_volatility is not None else "-"
+            train_txt = f"{plan.train_return:+.1%}" if plan.train_return is not None else "-"
+            dd_txt = f"{plan.train_max_drawdown:7.1%}" if plan.train_max_drawdown is not None else "-"
+            status_txt = "OK" if plan.target_met else "NO"
+            mode_txt = "PIN" if plan.forced else "AUTO"
+            print(
+                f"{plan.ticker:>10}  {plan.strategy_label:<18}  mode={mode_txt:<4}  style={plan.strategy_style:<14}  "
+                f"vol={vol_txt:>7}  train={train_txt:>7}  maxDD={dd_txt:>7}  trades={plan.train_trades:>3}  target={status_txt}"
+            )
+
     if backtests:
-        print(f"\n[Holdings Backtest 1Y | capital inicial={_format_money(initial_capital)}]")
+        print(f"\n[Holdings Backtest 1Y | capital inicial={_format_money(initial_capital)} | objetivo={target_return:+.1%}]")
         for b in backtests:
+            hit = "OK" if b.target_met_1y else "NO"
             print(
                 f"{b.ticker:>10}  strat={b.strategy_return_1y:+7.1%} ({_format_money(b.strategy_final_capital_1y)})  "
                 f"buy&hold={b.buy_hold_return_1y:+7.1%} ({_format_money(b.buy_hold_final_capital_1y)})  "
-                f"maxDD={b.max_drawdown_1y:7.1%}  trades={b.trades_1y:>3}"
+                f"maxDD={b.max_drawdown_1y:7.1%}  trades={b.trades_1y:>3}  lev={b.strategy_leverage:.1f}x  target={hit}"
             )
         agg_initial = float(sum(b.initial_capital_1y for b in backtests))
         agg_strat = float(sum(b.strategy_final_capital_1y for b in backtests))
         agg_bh = float(sum(b.buy_hold_final_capital_1y for b in backtests))
         agg_strat_ret = (agg_strat / agg_initial - 1.0) if agg_initial > 0 else float("nan")
         agg_bh_ret = (agg_bh / agg_initial - 1.0) if agg_initial > 0 else float("nan")
+        agg_target_hit = "OK" if np.isfinite(agg_strat_ret) and agg_strat_ret >= target_return else "NO"
         print(
             f"\n[Holdings Portfolio 1Y]  strat={agg_strat_ret:+7.1%} ({_format_money(agg_strat)})  "
-            f"buy&hold={agg_bh_ret:+7.1%} ({_format_money(agg_bh)})"
+            f"buy&hold={agg_bh_ret:+7.1%} ({_format_money(agg_bh)})  target={agg_target_hit}"
         )
 
     # ---- Interactive order generation (no execution) ----
@@ -1093,12 +1942,14 @@ def main() -> int:
         "asof": asof.isoformat(),
         "top": [r.__dict__ for r in top],
         "holdings": [a.__dict__ for a in actions],
+        "holdings_strategy_profiles": [p.__dict__ for p in strategy_plans],
         "holdings_signal_counts": {"BUY": buy_count, "SELL": sell_count, "HOLD": hold_count},
         "holdings_backtest_1y": [b.__dict__ for b in backtests],
         "holdings_portfolio_backtest_1y": {
             "initial_capital_total": float(sum(b.initial_capital_1y for b in backtests)) if backtests else 0.0,
             "strategy_final_capital_total": float(sum(b.strategy_final_capital_1y for b in backtests)) if backtests else 0.0,
             "buy_hold_final_capital_total": float(sum(b.buy_hold_final_capital_1y for b in backtests)) if backtests else 0.0,
+            "target_return": target_return,
             "strategy_return": (
                 float(sum(b.strategy_final_capital_1y for b in backtests) / sum(b.initial_capital_1y for b in backtests) - 1.0)
                 if backtests and sum(b.initial_capital_1y for b in backtests) > 0
@@ -1109,15 +1960,31 @@ def main() -> int:
                 if backtests and sum(b.initial_capital_1y for b in backtests) > 0
                 else 0.0
             ),
+            "target_met": (
+                bool(
+                    backtests
+                    and sum(b.initial_capital_1y for b in backtests) > 0
+                    and (
+                        float(sum(b.strategy_final_capital_1y for b in backtests) / sum(b.initial_capital_1y for b in backtests) - 1.0)
+                        >= target_return
+                    )
+                )
+            ),
         },
         "holdings_trade_log_path": str(trade_log_path) if trade_log_path is not None else None,
         "holdings_trade_log_rows": int(len(holdings_trade_log)) if holdings_trade_log is not None else 0,
         "initial_capital": initial_capital,
+        "target_return": target_return,
         "plots_dir": str(plot_dir) if plot_dir is not None else None,
         "generated_orders": orders,
     }
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "snapshot.json").write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    snapshot = _sanitize_for_json(snapshot)
+    (out_dir / "snapshot.json").write_text(
+        json.dumps(snapshot, ensure_ascii=False, indent=2, allow_nan=False),
+        encoding="utf-8",
+    )
+    print(f"\nOutputs guardados en: {out_dir}")
     return 0
 
 

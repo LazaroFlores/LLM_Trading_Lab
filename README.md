@@ -72,6 +72,7 @@ Objetivo: generar recomendaciones, confirmar órdenes y dejar todo registrado en
 
 - Si corres en modo interactivo, te preguntará si quieres generar órdenes `BUY` (Top y/o holdings con `BUY`) y también `SELL` (venta total) para holdings con señal `SELL`.
 - Esto genera `runs/YYYY-MM-DD/orders.csv` y `runs/YYYY-MM-DD/snapshot.json`.
+  - Si usas `--run-tag`, la salida va a `runs/YYYY-MM-DD/<run-tag>/...`
 
 2) Aplica las órdenes y actualiza `Daily Updates.csv` + `Trade Log.csv` del experimento:
 
@@ -136,13 +137,34 @@ Generar un gráfico (ejemplo):
 Este repo incluye un recomendador cuantitativo simple que:
 
 - Genera un **Top N** de tickers candidatos desde un universo (`config/universe.txt`)
-- Genera acciones **BUY/SELL/HOLD** para tus holdings (`config/holdings.txt`) usando estrategia **long-only táctica** de **pisos/techos/canales + Fibonacci** (`SELL` = salida defensiva)
+- Genera acciones **BUY/SELL/HOLD** para tus holdings (`config/holdings.txt`) usando una estrategia **long-only personalizada por ticker** (selector adaptativo entre perfiles `breakout/pullback/hybrid/mean-reversion/regime-momentum` sobre canales + Fibonacci + tendencia)
+- Permite **fijar estrategia por ticker** (modo PIN) con `config/holdings_strategies.json` (ejemplo: `AVAV -> breakout_fast`)
+- Incluye perfiles agresivos (por ejemplo `ko_turbo`) con mayor exposición/riesgo para buscar mayor retorno
 - (Opcional) Te pregunta si quieres **generar órdenes** de compra; guarda un CSV (no ejecuta trades)
 - Muestra un backtest rapido de 1 ano por holding (estrategia vs buy&hold) con capital inicial configurable (default: `100 USD`)
 - Muestra resumen de conteo de señales en consola (`BUY/SELL/HOLD`) para holdings
+- Reporta si cada ticker cumple el objetivo de rendimiento 1Y (`--target-return`, default `+20%`)
 
 Configuración:
 - Edita `config/universe.txt` y `config/holdings.txt`
+- Opcional: fija perfiles por ticker en `config/holdings_strategies.json`
+
+Ejemplo de `config/holdings_strategies.json`:
+
+```json
+{
+  "AVAV": "breakout_fast",
+  "KO": "ko_turbo",
+  "MELI": "meli_turbo"
+}
+```
+
+Perfiles disponibles: `breakout_fast`, `breakout_swing`, `pullback_trend`, `hybrid_channel`, `mean_reversion`, `mx_defensive`, `regime_momentum`, `ko_turbo`, `ko_fib618`, `ko_candles_book`, `candles_book_pdf`, `candles_book_pdf_ctx`, `ko_channel_reversal`, `ko_channel_pivots`, `ko_pivot_reversal`, `meli_turbo`.
+
+Notas de perfiles de velas:
+- `ko_candles_book`: velas + filtros de contexto (canal/tendencia).
+- `candles_book_pdf`: version independiente/pura basada solo en patrones de velas del eBook (sin reglas de canal/Fibonacci para entrada/salida).
+- `candles_book_pdf_ctx`: version intermedia con filtros minimos de contexto (zona y tendencia corta) + salida protectora simple.
 
 Ejecutar:
 
@@ -150,20 +172,53 @@ Ejecutar:
 .\.venv311\Scripts\python.exe .\recommend.py --top 5
 ```
 
-Solo holdings (sin Top del universo), usando 3 anos de lookback y capital inicial de 100 USD:
+Solo holdings (sin Top del universo), usando 5 anos de lookback y capital inicial de 100 USD:
 
 ```powershell
-.\.venv311\Scripts\python.exe .\recommend.py --top 0 --holdings .\config\holdings.txt --holdings-lookback-years 3 --backtest-days 252 --initial-capital 100
+.\.venv311\Scripts\python.exe .\recommend.py --top 0 --holdings .\config\holdings.txt --holdings-lookback-years 5 --backtest-days 252 --initial-capital 100 --target-return 0.20
 ```
 
-Generar grafico por holding (precio+canal+Fibonacci con marcas BUY/SELL/HOLD, conteo de señales y equity curve en USD):
+Los gráficos por holding se generan por default en cada corrida (precio+canal+Fibonacci con marcas BUY/SELL/HOLD, conteo de señales y equity curve en USD):
 
 ```powershell
-.\.venv311\Scripts\python.exe .\recommend.py --top 0 --holdings .\config\holdings.txt --holdings-lookback-years 3 --backtest-days 252 --initial-capital 100 --plot-holdings
+.\.venv311\Scripts\python.exe .\recommend.py --top 0 --holdings .\config\holdings.txt --holdings-lookback-years 5 --backtest-days 252 --initial-capital 100
 ```
 
 Salida de graficos por default:
 - `runs/YYYY-MM-DD/plots/*.png`
+
+Nota: los marcadores visuales de pivots (pisos/techos locales) se removieron de las gráficas para reducir ruido; solo se muestran entradas/salidas (y los niveles que aplique el perfil).
+
+### Estandarizar outputs (evitar `runs_*`)
+
+En lugar de crear un directorio nuevo por corrida (ej: `runs_ko_turbo`, `runs_meli_plotfix`), usa un **único root** `runs/` y separa variantes por subcarpetas con `--run-tag`:
+
+```powershell
+.\.venv311\Scripts\python.exe .\recommend.py --top 0 --holdings .\config\holdings.txt --asof YYYY-MM-DD --run-tag ko_turbo
+```
+
+Eso genera:
+- `runs/YYYY-MM-DD/ko_turbo/snapshot.json`
+- `runs/YYYY-MM-DD/ko_turbo/holdings_trade_log.csv`
+- `runs/YYYY-MM-DD/ko_turbo/plots/*.png`
+
+Si luego quieres ejecutar `paper_trade.py` con ese run:
+
+```powershell
+.\.venv311\Scripts\python.exe .\paper_trade.py --data-dir Experiments\mi_experimento\csv_files --holdings-trade-log "runs\YYYY-MM-DD\ko_turbo\holdings_trade_log.csv" --holdings-log-mode latest --open-notional 250 --fill next_open --slippage-bps 10 --fee 0
+```
+
+Si necesitas desactivar graficos en una corrida puntual:
+
+```powershell
+.\.venv311\Scripts\python.exe .\recommend.py --top 0 --holdings .\config\holdings.txt --no-plot-holdings
+```
+
+Si quieres usar un archivo de PINs distinto:
+
+```powershell
+.\.venv311\Scripts\python.exe .\recommend.py --top 0 --holdings .\config\holdings.txt --holdings-strategies .\config\holdings_strategies.json
+```
 
 Usar un universo externo (por ejemplo, el de CodexTrader) con prefijos tipo `NYSE:` / `NASDAQ:` / `BMV:`:
 
@@ -180,13 +235,14 @@ Usar el histórico del experimento como universo/holdings (derivado del último 
 Nota: en el dataset histórico incluido, el último día (`2025-12-26`) solo tiene la fila `TOTAL`, así que `--holdings-from-daily` devolverá vacío a menos que uses tu propio `Daily Updates.csv`.
 
 Outputs:
-- `runs/YYYY-MM-DD/snapshot.json`
-- `runs/YYYY-MM-DD/orders.csv` (si confirmas compras en modo interactivo)
-- `runs/YYYY-MM-DD/holdings_trade_log.csv` (registro diario por ticker de señal, posición, acción y equity)
+- `runs/YYYY-MM-DD[/<run-tag>]/snapshot.json`
+- `runs/YYYY-MM-DD[/<run-tag>]/orders.csv` (si confirmas compras en modo interactivo)
+- `runs/YYYY-MM-DD[/<run-tag>]/holdings_trade_log.csv` (registro diario por ticker de señal, posición, acción y equity)
 
 Campos nuevos en `snapshot.json`:
 - `holdings_signal_counts`: conteo de señales `BUY/SELL/HOLD`
 - `holdings_portfolio_backtest_1y`: resumen agregado del portafolio (capital inicial/final y retornos estrategia vs buy&hold)
+- `holdings_strategy_profiles`: perfil elegido por ticker (estilo, volatilidad, métricas train y cumplimiento de target)
 
 ## Qué se registra
 

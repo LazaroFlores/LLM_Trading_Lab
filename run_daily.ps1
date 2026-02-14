@@ -2,8 +2,9 @@ param(
     [string]$Experiment = "mi_experimento",
     [string]$PythonPath = ".\.venv311\Scripts\python.exe",
     [string]$HoldingsPath = ".\config\holdings.txt",
+    [string]$RunTag = "",
     [int]$Top = 0,
-    [int]$HoldingsLookbackYears = 3,
+    [int]$HoldingsLookbackYears = 5,
     [int]$BacktestDays = 252,
     [double]$InitialCapital = 100.0,
     [switch]$PlotHoldings,
@@ -44,11 +45,18 @@ if (-not (Test-Path -LiteralPath $dailyCsv) -or -not (Test-Path -LiteralPath $tr
 
 $asof = Get-AsOfString -NowDate (Get-Date)
 $runDir = Join-Path -Path "runs" -ChildPath $asof
+$runTagTrim = $RunTag.Trim()
+if (-not [string]::IsNullOrWhiteSpace($runTagTrim)) {
+    $runDir = Join-Path -Path $runDir -ChildPath $runTagTrim
+}
 $holdingsTradeLogPath = Join-Path -Path $runDir -ChildPath "holdings_trade_log.csv"
 
 Write-Host "AsOf: $asof"
 Write-Host "Experimento: $Experiment"
 Write-Host "Data dir: $dataDir"
+if (-not [string]::IsNullOrWhiteSpace($runTagTrim)) {
+    Write-Host "RunTag: $runTagTrim"
+}
 
 $recommendArgs = @(
     ".\recommend.py",
@@ -60,6 +68,10 @@ $recommendArgs = @(
     "--backtest-days", "$BacktestDays",
     "--initial-capital", "$InitialCapital"
 )
+
+if (-not [string]::IsNullOrWhiteSpace($runTagTrim)) {
+    $recommendArgs += @("--run-tag", $runTagTrim)
+}
 
 if ($PlotHoldings.IsPresent) {
     $recommendArgs += "--plot-holdings"
