@@ -1,0 +1,4 @@
+interface:
+  display_name: "Git Untracked Commit Push"
+  short_description: "Revisa untracked, redacta commit con comentarios y hace push."
+  default_prompt: "Analizar untracked, crear commit message con comentarios basados en cambios y hacer push."
