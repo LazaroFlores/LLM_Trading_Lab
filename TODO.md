@@ -1,4 +1,4 @@
-﻿﻿# TODO - LLM Trading Lab (objetivo: rendimientos)
+﻿# TODO - LLM Trading Lab (objetivo: rendimientos)
 
 Este archivo lista el trabajo pendiente para evolucionar el repo hacia un pipeline de investigación/ejecución orientado a retornos, manteniendo reproducibilidad y auditabilidad.
 
@@ -6,6 +6,7 @@ Este archivo lista el trabajo pendiente para evolucionar el repo hacia un pipeli
 
 - Definir un "núcleo" de evaluación: interfaz de estrategia, calendario, universo, costos (slippage/fees) y métricas estándar.
 - Estandarizar el "data layer": descarga/caché, control de ajustes (splits/dividendos), validación de gaps y manejo de tickers delist.
+  - Implementar un Data Adapter Pattern para soportar múltiples backends (CSV, SQLite, Parquet) sin cambiar la lógica de negocio.
 - Normalizar paths/entrypoints:
   - Alinear documentacion/Makefile/workflows con la estructura real bajo `Experiments/chatgpt_micro-cap/`.
 - Añadir un modo batch/research (no interactivo) para producir reportes comparables entre estrategias.
