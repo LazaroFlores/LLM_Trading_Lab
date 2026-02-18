@@ -193,7 +193,8 @@ def _download_day(ticker: str, start: date, end_inclusive: date) -> pd.DataFrame
         end=end_excl.isoformat(),
         auto_adjust=True,
         progress=False,
-        threads=True,
+        # Single ticker request; disabling yf threads avoids intermittent cache lock issues.
+        threads=False,
     )
     if not isinstance(df, pd.DataFrame) or df.empty:
         return pd.DataFrame()
@@ -232,11 +233,15 @@ def _next_session_price(
     return session, px
 
 
-def _session_close(ticker: str, session: date) -> float:
-    df = _download_day(ticker, start=session, end_inclusive=session)
+def _session_close(ticker: str, session: date, max_lookback_days: int = 14) -> float:
+    start = session - timedelta(days=max_lookback_days)
+    df = _download_day(ticker, start=start, end_inclusive=session)
     if df.empty or "Close" not in df.columns:
         raise RuntimeError(f"No se pudo obtener Close para {ticker} en {session}")
-    px = float(df.sort_index()["Close"].iloc[-1])
+    close = pd.to_numeric(df.sort_index()["Close"], errors="coerce").dropna()
+    if close.empty:
+        raise RuntimeError(f"No se pudo obtener Close para {ticker} en {session}")
+    px = float(close.iloc[-1])
     if not np.isfinite(px) or px <= 0:
         raise RuntimeError(f"Close inválido {ticker} {session}={px}")
     return px
@@ -371,6 +376,15 @@ def _append_trade_log(trade_log_path: Path, rows: list[dict]) -> None:
     out.to_csv(trade_log_path, index=False)
 
 
+def _write_pending_orders(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out = pd.DataFrame(rows)
+    if path.exists():
+        prev = pd.read_csv(path)
+        out = pd.concat([prev, out], ignore_index=True) if not prev.empty else out
+    out.to_csv(path, index=False)
+
+
 def _append_daily_updates(daily_path: Path, rows: list[dict], replace_date: date | None = None) -> None:
     daily_path.parent.mkdir(parents=True, exist_ok=True)
     if daily_path.exists():
@@ -449,6 +463,7 @@ def main() -> int:
     parser.add_argument("--slippage-bps", type=float, default=10.0, help="Slippage en bps (default: 10 = 0.10%%).")
     parser.add_argument("--fee", type=float, default=0.0, help="Fee fijo por orden (en moneda del experimento).")
     parser.add_argument("--force", action="store_true", help="Permite re-aplicar ordenes en una fecha (puede duplicar el Trade Log).")
+    parser.add_argument("--pending-orders-out", default=None, help="CSV opcional para guardar ordenes pendientes por falta de precio en proxima sesion.")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -497,6 +512,7 @@ def main() -> int:
     fee = float(args.fee)
 
     trade_rows: list[dict] = []
+    pending_no_price_rows: list[dict] = []
     mtm_session: date | None = None
 
     if orders_df is not None and not orders_df.empty:
@@ -514,7 +530,27 @@ def main() -> int:
             qty = str(o["qty"]).strip().upper() if "qty" in o and pd.notna(o["qty"]) else ""
             reason = str(o["reason"]) if "reason" in o and pd.notna(o["reason"]) else ""
 
-            session, ref_px = _next_session_price(t, asof=asof, price_field=fill_field)
+            try:
+                session, ref_px = _next_session_price(t, asof=asof, price_field=fill_field)
+            except RuntimeError as exc:
+                msg = str(exc)
+                if "No hay datos para" in msg:
+                    pending_no_price_rows.append(
+                        {
+                            "asof": asof.isoformat(),
+                            "ticker": t,
+                            "side": side,
+                            "qty": qty,
+                            "shares": float(shares) if np.isfinite(shares) else "",
+                            "notional_usd": float(notional) if np.isfinite(notional) else "",
+                            "reason": reason,
+                            "fill": args.fill,
+                            "error": msg,
+                        }
+                    )
+                    print(f"Advertencia: {msg}. Se salta orden {side} {t} (asof={asof}).")
+                    continue
+                raise
             mtm_session = session  # last applied session wins (typical daily run)
             fill_px = _apply_slippage(side, ref_px, slippage_bps=slippage_bps)
 
@@ -601,9 +637,20 @@ def main() -> int:
         _append_trade_log(trade_path, trade_rows)
     _append_daily_updates(daily_path, daily_rows, replace_date=mtm_session)
 
+    pending_out = Path(args.pending_orders_out) if args.pending_orders_out else None
+    if pending_out is not None:
+        if pending_no_price_rows:
+            _write_pending_orders(pending_out, pending_no_price_rows)
+        elif pending_out.exists():
+            pending_out.unlink()
+
     print(f"MTM date: {mtm_session}  total_equity={total_equity:,.2f}  cash={cash:,.2f}  positions={len(positions)}")
     if trade_rows:
         print(f"Applied orders: {len(trade_rows)} (fill={args.fill}, slippage_bps={slippage_bps}, fee={fee})")
+    if pending_no_price_rows:
+        print(f"Skipped orders (no next-session price): {len(pending_no_price_rows)}")
+        if pending_out is not None:
+            print(f"Pending orders saved: {pending_out}")
     return 0
 
 

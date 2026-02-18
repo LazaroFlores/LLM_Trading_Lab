@@ -50,6 +50,7 @@ if (-not [string]::IsNullOrWhiteSpace($runTagTrim)) {
     $runDir = Join-Path -Path $runDir -ChildPath $runTagTrim
 }
 $holdingsTradeLogPath = Join-Path -Path $runDir -ChildPath "holdings_trade_log.csv"
+$pendingOrdersPath = Join-Path -Path $runDir -ChildPath "pending_orders_no_price.csv"
 
 Write-Host "AsOf: $asof"
 Write-Host "Experimento: $Experiment"
@@ -95,7 +96,8 @@ $paperArgs = @(
     "--open-notional", "$OpenNotional",
     "--fill", $Fill,
     "--slippage-bps", "$SlippageBps",
-    "--fee", "$Fee"
+    "--fee", "$Fee",
+    "--pending-orders-out", $pendingOrdersPath
 )
 
 if ($HoldingsLogMode -eq "date" -and -not [string]::IsNullOrWhiteSpace($HoldingsLogDate)) {
@@ -116,6 +118,9 @@ Write-Host "`nListo."
 Write-Host "- Holdings trade log: $holdingsTradeLogPath"
 Write-Host "- Daily Updates: $dailyCsv"
 Write-Host "- Trade Log: $tradeCsv"
+if (Test-Path -LiteralPath $pendingOrdersPath) {
+    Write-Host "- Pending orders (sin precio prox. sesion): $pendingOrdersPath"
+}
 if ($Top -gt 0) {
     Write-Host "- Nota: Top > 0 solo genera ranking informativo en modo no interactivo."
 }

@@ -742,6 +742,15 @@ def _prepare_ohlc(hist: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _close_series_from_ohlc(ohlc: pd.DataFrame) -> pd.Series:
+    if ohlc is None or ohlc.empty or "Close" not in ohlc.columns:
+        return pd.Series(dtype=float)
+    close = pd.to_numeric(ohlc["Close"], errors="coerce")
+    if not isinstance(close, pd.Series):
+        return pd.Series(dtype=float)
+    return close.dropna()
+
+
 def _channel_indicators(
     ohlc: pd.DataFrame,
     profile: HoldingStrategyProfile | None = None,
@@ -1151,8 +1160,8 @@ def _candidate_profile_keys_for_ticker(ticker: str, ohlc: pd.DataFrame) -> list[
         return ["ko_channel_pivots", "ko_candles_book", "ko_channel_reversal", "ko_turbo", "regime_momentum", "hybrid_channel", "pullback_trend"]
     if t == "MELI":
         return ["meli_turbo", "mean_reversion", "regime_momentum", "hybrid_channel"]
-    close = pd.to_numeric(ohlc.get("Close"), errors="coerce")
-    ret = close.pct_change().dropna()
+    close = _close_series_from_ohlc(ohlc)
+    ret = close.pct_change().dropna() if not close.empty else pd.Series(dtype=float)
     if ret.empty:
         return [DEFAULT_PROFILE_KEY]
     ann_vol = float(ret.tail(252).std(ddof=0) * np.sqrt(252.0))
@@ -1189,8 +1198,8 @@ def _select_profile_for_ticker(
     forced_profile_key: str | None = None,
 ) -> tuple[HoldingStrategyProfile, HoldingStrategyPlan]:
     default_profile = STRATEGY_PROFILE_BY_KEY[DEFAULT_PROFILE_KEY]
-    close = pd.to_numeric(ohlc.get("Close"), errors="coerce")
-    ret = close.pct_change().dropna()
+    close = _close_series_from_ohlc(ohlc)
+    ret = close.pct_change().dropna() if not close.empty else pd.Series(dtype=float)
     ann_vol = float(ret.tail(252).std(ddof=0) * np.sqrt(252.0)) if not ret.empty else None
     forced_profile = STRATEGY_PROFILE_BY_KEY.get(str(forced_profile_key).strip().lower()) if forced_profile_key else None
     if ohlc.empty or len(ohlc) < 260:

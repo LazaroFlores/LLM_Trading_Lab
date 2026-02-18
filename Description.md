@@ -65,6 +65,6 @@ Existe un recomendador cuantitativo simple en `recommend.py` que puede generar:
 Para experimentos propios, el repo incluye:
 
 - `init_experiment.py`: inicializa un experimento nuevo con `Daily Updates.csv` y `Trade Log.csv`
-- `paper_trade.py`: aplica `orders.csv` o convierte `holdings_trade_log.csv` a órdenes y actualiza los CSV del experimento (paper trading; long/short)
-- `run_daily.ps1`: atajo diario que encadena `recommend.py` + `paper_trade.py` en una sola ejecución
+- `paper_trade.py`: aplica `orders.csv` o convierte `holdings_trade_log.csv` a órdenes y actualiza los CSV del experimento (paper trading; long/short). Si falta precio de siguiente sesión para un ticker, salta esa orden con advertencia y sigue con las demás.
+- `run_daily.ps1`: atajo diario que encadena `recommend.py` + `paper_trade.py` en una sola ejecución y deja `pending_orders_no_price.csv` cuando alguna orden no tiene precio de próxima sesión.
 - `run_daily.bat`: atajo para doble clic que llama `run_daily.ps1` con parámetros por defecto

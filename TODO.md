@@ -22,6 +22,7 @@ Este archivo lista el trabajo pendiente para evolucionar el repo hacia un pipeli
   - Validaciones de riesgo: límites por posición, exposición neta/bruta, drawdown stop.
   - Evitar duplicados de forma robusta (run_id por ejecución, hashing de órdenes).
   - Soportar parciales / no fills y órdenes limit.
+  - Reintento automático de `pending_orders_no_price.csv` (órdenes omitidas por falta de precio en próxima sesión).
 
 ## Prioridad media
 

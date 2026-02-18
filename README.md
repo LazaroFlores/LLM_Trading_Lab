@@ -90,6 +90,8 @@ Notas:
 - `paper_trade.py` soporta long y short. Si envías una orden `SELL` sin posición previa, se interpreta como entrada short (paper).
 - Por ahora `recommend.py` no propone shorts automáticamente; si los quieres, se pueden añadir reglas/estrategia.
 - `--fill next_open` (default) simula ejecución en la siguiente sesión a la fecha `asof` del order. Alternativa: `--fill next_close`.
+- Si un ticker no tiene precio disponible para la siguiente sesión, `paper_trade.py` ahora salta esa orden con advertencia y continúa con el resto (evita abortar toda la corrida).
+- Puedes persistir esas órdenes omitidas con `--pending-orders-out <ruta.csv>` para reintentar/auditar después.
 - Con `--holdings-trade-log`, `paper_trade.py` convierte acciones del log (`BUY`, `SELL_TO_CLOSE`, `SHORT`, `COVER`, `FLIP_*`) en órdenes ejecutables.
 - `--holdings-log-mode latest` usa el último día del log, `date` usa `--holdings-log-date`, y `all` recorre todas las fechas del log.
 
@@ -101,6 +103,7 @@ Notas:
 
 Notas del script:
 - Usa `recommend.py` en modo no interactivo y luego `paper_trade.py` con `holdings_trade_log.csv`.
+- Guarda órdenes pendientes por falta de precio en `runs/YYYY-MM-DD[/<run-tag>]/pending_orders_no_price.csv` (si aplica).
 - Si hoy cae en fin de semana, usa viernes como `asof`.
 - Puedes activar gráficos con `-PlotHoldings`.
 
@@ -239,6 +242,7 @@ Outputs:
 - `runs/YYYY-MM-DD[/<run-tag>]/snapshot.json`
 - `runs/YYYY-MM-DD[/<run-tag>]/orders.csv` (si confirmas compras en modo interactivo)
 - `runs/YYYY-MM-DD[/<run-tag>]/holdings_trade_log.csv` (registro diario por ticker de señal, posición, acción y equity)
+- `runs/YYYY-MM-DD[/<run-tag>]/pending_orders_no_price.csv` (opcional, órdenes omitidas por falta de precio de próxima sesión)
 
 Campos nuevos en `snapshot.json`:
 - `holdings_signal_counts`: conteo de señales `BUY/SELL/HOLD`
