@@ -400,6 +400,7 @@ class HoldingAction:
     stop_loss: float | None
     reason: str
     strategy: str = "canal_hibrido"
+    confidence_weight: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -546,7 +547,7 @@ STRATEGY_PROFILES: tuple[HoldingStrategyProfile, ...] = (
         slow_sma=55,
         breakout_up_buffer=0.003,
         breakout_down_buffer=0.009,
-        leverage=2.5,
+        leverage=1.0,
     ),
     HoldingStrategyProfile(
         key="ko_fib618",
@@ -559,7 +560,7 @@ STRATEGY_PROFILES: tuple[HoldingStrategyProfile, ...] = (
         slow_sma=89,
         breakout_up_buffer=0.004,
         breakout_down_buffer=0.004,
-        leverage=2.5,
+        leverage=1.0,
     ),
     HoldingStrategyProfile(
         key="ko_channel_reversal",
@@ -572,7 +573,7 @@ STRATEGY_PROFILES: tuple[HoldingStrategyProfile, ...] = (
         slow_sma=89,
         breakout_up_buffer=0.004,
         breakout_down_buffer=0.004,
-        leverage=2.5,
+        leverage=1.0,
     ),
     HoldingStrategyProfile(
         key="ko_channel_pivots",
@@ -585,7 +586,7 @@ STRATEGY_PROFILES: tuple[HoldingStrategyProfile, ...] = (
         slow_sma=89,
         breakout_up_buffer=0.004,
         breakout_down_buffer=0.004,
-        leverage=2.5,
+        leverage=1.0,
         pivot_left=7,
         pivot_right=3,
     ),
@@ -600,7 +601,7 @@ STRATEGY_PROFILES: tuple[HoldingStrategyProfile, ...] = (
         slow_sma=89,
         breakout_up_buffer=0.004,
         breakout_down_buffer=0.004,
-        leverage=2.5,
+        leverage=1.0,
     ),
     HoldingStrategyProfile(
         key="candles_book_pdf",
@@ -639,7 +640,7 @@ STRATEGY_PROFILES: tuple[HoldingStrategyProfile, ...] = (
         slow_sma=89,
         breakout_up_buffer=0.004,
         breakout_down_buffer=0.004,
-        leverage=2.5,
+        leverage=1.0,
         pivot_left=7,
         pivot_right=3,
     ),
@@ -654,7 +655,7 @@ STRATEGY_PROFILES: tuple[HoldingStrategyProfile, ...] = (
         slow_sma=120,
         breakout_up_buffer=0.008,
         breakout_down_buffer=0.008,
-        leverage=3.0,
+        leverage=1.0,
     ),
     HoldingStrategyProfile(
         key="rocket_momentum",
@@ -667,7 +668,7 @@ STRATEGY_PROFILES: tuple[HoldingStrategyProfile, ...] = (
         slow_sma=100,
         breakout_up_buffer=0.004,
         breakout_down_buffer=0.004,
-        leverage=3.0,
+        leverage=1.0,
     ),
     HoldingStrategyProfile(
         key="nvo_growth_turbo",
@@ -680,7 +681,7 @@ STRATEGY_PROFILES: tuple[HoldingStrategyProfile, ...] = (
         slow_sma=55,
         breakout_up_buffer=0.003,
         breakout_down_buffer=0.009,
-        leverage=2.5,
+        leverage=1.0,
     ),
     HoldingStrategyProfile(
         key="nke_rebound_fib",
@@ -693,7 +694,7 @@ STRATEGY_PROFILES: tuple[HoldingStrategyProfile, ...] = (
         slow_sma=89,
         breakout_up_buffer=0.004,
         breakout_down_buffer=0.004,
-        leverage=2.0,
+        leverage=1.0,
     ),
     HoldingStrategyProfile(
         key="pep_defensive_lev",
@@ -706,7 +707,7 @@ STRATEGY_PROFILES: tuple[HoldingStrategyProfile, ...] = (
         slow_sma=200,
         breakout_up_buffer=0.005,
         breakout_down_buffer=0.005,
-        leverage=2.0,
+        leverage=1.0,
     ),
     HoldingStrategyProfile(
         key="fmty_income_max",
@@ -1285,6 +1286,22 @@ def _select_profile_for_ticker(
     return best_profile, plan
 
 
+def _get_news_sentiment(ticker: str) -> float:
+    """
+    Simula la integración de un modelo de sentimiento (LLM).
+    En una implementación real, esto consultaría los archivos Markdown de 
+    'collected_artifacts' o llamaría a una API de procesamiento de lenguaje natural.
+    Retorna un score entre -1.0 (bearish) y 1.0 (bullish).
+    """
+    # Ejemplo de mapeo manual o resultados de un proceso previo de LLM
+    sentiment_map = {
+        "MELI": 0.85,
+        "AVAV": 0.70,
+        "KO": 0.15
+    }
+    return sentiment_map.get(ticker.upper(), 0.0)
+
+
 def _holding_action_from_channels(
     ticker: str,
     ind: pd.DataFrame,
@@ -1340,6 +1357,20 @@ def _holding_action_from_channels(
     zone = float(last["zone"])
     buy_sig, sell_sig, _, signal = _signals_from_profile(ind=ind, profile=p)
     last_signal = str(signal.iloc[-1]) if len(signal) else "HOLD"
+
+    # Cálculo de peso de confianza (Apalancamiento Interno)
+    conf_weight = 1.0
+    if last_signal == "BUY":
+        # 1. Componente Técnico (hasta +0.4): Tendencia y RSI saludable
+        if bool(last.get("trend_up", False)): conf_weight += 0.2
+        rsi = float(last.get("rsi14", 50))
+        if 45 <= rsi <= 65: conf_weight += 0.2
+        
+        # 2. Componente de Sentimiento LLM (hasta +0.6)
+        sentiment = _get_news_sentiment(ticker)
+        if sentiment > 0:
+            conf_weight += (sentiment * 0.6)
+
     if last_signal == "BUY" and bool(buy_sig.iloc[-1]):
         return HoldingAction(
             ticker=ticker,
@@ -1348,6 +1379,7 @@ def _holding_action_from_channels(
             stop_loss=stop_v,
             reason=f"senal {p.label} ({p.style}) activa (zone={zone:.2f})",
             strategy=p.label,
+            confidence_weight=round(conf_weight, 2)
         )
     if last_signal == "SELL" and bool(sell_sig.iloc[-1]):
         return HoldingAction(
@@ -1948,7 +1980,11 @@ def main() -> int:
         for a in buy_holdings:
             if not _prompt_yes_no(f"Quieres generar una orden de COMPRA (add) para {a.ticker}? (s/n): "):
                 continue
-            notional = _prompt_float("Monto USD a invertir (ej: 250): ")
+            
+            # Sugerir notional basado en el peso de confianza
+            suggested_notional = 250.0 * a.confidence_weight
+            print(f"   [Confianza: {a.confidence_weight}x] -> Sugerido: ${suggested_notional:.2f}")
+            notional = _prompt_float(f"Monto USD a invertir (default {suggested_notional:.2f}): ")
             est_shares = notional / a.close if a.close > 0 else float("nan")
             orders.append(
                 {

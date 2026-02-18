@@ -1,4 +1,4 @@
-﻿# LLM Trading Lab
+﻿﻿# LLM Trading Lab
 
 Objetivo actual: convertir este repositorio en un **laboratorio de investigación cuantitativa** orientado a **generar rendimientos** mediante:
 
@@ -138,6 +138,7 @@ Este repo incluye un recomendador cuantitativo simple que:
 
 - Genera un **Top N** de tickers candidatos desde un universo (`config/universe.txt`)
 - Genera acciones **BUY/SELL/HOLD** para tus holdings (`config/holdings.txt`) usando una estrategia **long-only personalizada por ticker** (selector adaptativo entre perfiles `breakout/pullback/hybrid/mean-reversion/regime-momentum` sobre canales + Fibonacci + tendencia)
+- Calcula un **Apalancamiento Interno (Confidence Weight)**: ajusta el monto sugerido de inversión (ej. de 1.0x a 2.0x) basándose en la confluencia de indicadores técnicos (RSI, tendencia) y un score de sentimiento de noticias (LLM).
 - Permite **fijar estrategia por ticker** (modo PIN) con `config/holdings_strategies.json` (ejemplo: `AVAV -> breakout_fast`)
 - Incluye perfiles agresivos (por ejemplo `ko_turbo`) con mayor exposición/riesgo para buscar mayor retorno
 - (Opcional) Te pregunta si quieres **generar órdenes** de compra; guarda un CSV (no ejecuta trades)

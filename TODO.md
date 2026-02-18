@@ -1,4 +1,4 @@
-﻿# TODO - LLM Trading Lab (objetivo: rendimientos)
+﻿﻿# TODO - LLM Trading Lab (objetivo: rendimientos)
 
 Este archivo lista el trabajo pendiente para evolucionar el repo hacia un pipeline de investigación/ejecución orientado a retornos, manteniendo reproducibilidad y auditabilidad.
 
@@ -10,7 +10,7 @@ Este archivo lista el trabajo pendiente para evolucionar el repo hacia un pipeli
   - Alinear documentacion/Makefile/workflows con la estructura real bajo `Experiments/chatgpt_micro-cap/`.
 - Añadir un modo batch/research (no interactivo) para producir reportes comparables entre estrategias.
 - Evolucionar `recommend.py`:
-  - Soportar stop-loss por holding (leer de CSV o config) y sizing por riesgo.
+  - [x] Soportar sizing por riesgo (implementado via `confidence_weight` técnico + news sentiment).
   - Añadir backtest walk-forward de la señal usada para el Top N (evitar sobreajuste).
   - Registrar decisiones/señales con versionado (parámetros y datos as-of).
   - Calibrar estrategia de canales + Fibonacci por activo/regimen (hoy los resultados 1Y son mixtos en holdings).
